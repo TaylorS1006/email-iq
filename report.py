@@ -1,0 +1,1119 @@
+"""
+SendSmart Report Generator.
+
+Fetches email data, runs the analyzer, and generates index.html —
+a GitHub Pages dashboard with performance metrics, benchmark comparisons,
+and playbook insights per content type.
+"""
+
+import json
+import os
+import subprocess
+from collections import defaultdict
+from datetime import datetime, timezone
+from typing import Optional
+
+import anthropic
+from dotenv import load_dotenv
+
+from analyzer import build_playbook
+from hubspot_client import EmailRecord, fetch_emails
+
+try:
+    from pipeline import analyze_campaign_pipeline
+    _PIPELINE_IMPORT_OK = True
+except ImportError:
+    _PIPELINE_IMPORT_OK = False
+
+load_dotenv()
+
+# B2B SaaS email benchmarks (industry averages)
+BENCHMARKS = {
+    "open_rate": 0.35,
+    "click_rate": 0.03,
+    "ctor": 0.10,
+}
+
+BENCHMARK_LABELS = {
+    "open_rate": "35%",
+    "click_rate": "3%",
+    "ctor": "10%",
+}
+
+AI_BENCHMARKS = {
+    "open_rate":        ("Open Rate",        0.19,  False),
+    "click_rate":       ("Click Rate",       None,  False),
+    "ctor":             ("CTOR",             0.075, False),
+    "delivered_rate":   ("Delivered Rate",   None,  False),
+    "unsubscribe_rate": ("Unsubscribe Rate", 0.005, True),
+    "bounce_rate":      ("Bounce Rate",      0.0025,True),
+}
+
+
+def _generate_ai_summary(label: str, metrics: dict, prior: Optional[dict]) -> dict:
+    """Call Claude to generate a 2-3 sentence summary + 2-3 bullets for a metric set."""
+    client = anthropic.Anthropic()
+
+    def fmt(key):
+        val = metrics.get(key, 0)
+        bm_label, bm_val, invert = AI_BENCHMARKS[key]
+        line = f"  {bm_label}: {val:.1%}"
+        if bm_val is not None:
+            direction = "below" if val < bm_val else "above"
+            line += f" (benchmark {bm_val:.2%}, {direction})"
+        if prior:
+            delta = val - prior.get(key, 0)
+            arrow = "↑" if delta >= 0 else "↓"
+            line += f" | {arrow}{abs(delta):.1%} vs prev period"
+        return line
+
+    metrics_text = "\n".join([
+        fmt("delivered_rate"),
+        fmt("open_rate"),
+        fmt("click_rate"),
+        fmt("ctor"),
+        fmt("unsubscribe_rate"),
+        fmt("bounce_rate"),
+    ])
+
+    prompt = f"""You are analyzing email performance data for Medallion, a B2B SaaS company.
+Segment: {label}
+Sample: {metrics.get('count', 0)} emails, {metrics.get('sent', 0):,} total sent
+
+Metrics (with benchmark and period-over-period delta where available):
+{metrics_text}
+
+Write a performance summary with this exact JSON structure:
+{{
+  "summary": "2-3 sentences. Reference actual percentages. State plainly if metrics are behind benchmark — do not soften. Note any interesting relationships between metrics (e.g. high delivered but low open suggests subject line issue, not deliverability). Be direct and specific.",
+  "recommendations": [
+    "Specific, actionable recommendation based directly on the numbers above — not generic advice",
+    "Second recommendation",
+    "Third recommendation (only include if genuinely supported by the data)"
+  ]
+}}
+
+Rules:
+- Use the actual numbers in every sentence
+- If a metric has no benchmark listed, do not invent one
+- Recommendations must reference specific metrics from the data
+- 2-3 sentences for summary, 2-3 bullets max
+- Return ONLY valid JSON, no markdown fences"""
+
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=512,
+        output_config={"format": {"type": "json_schema", "schema": {
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string"},
+                "recommendations": {"type": "array", "items": {"type": "string"}}
+            },
+            "required": ["summary", "recommendations"],
+            "additionalProperties": False,
+        }}},
+        messages=[{"role": "user", "content": prompt}],
+    )
+    text = next(b.text for b in response.content if b.type == "text")
+    return json.loads(text)
+
+
+def _pct(value: float) -> str:
+    return f"{value:.1%}"
+
+
+def _delta_class(actual: float, benchmark: float) -> str:
+    if actual >= benchmark * 1.1:
+        return "good"
+    if actual >= benchmark * 0.85:
+        return "ok"
+    return "bad"
+
+
+def _trend_label(current: float, prior: float) -> str:
+    if prior == 0:
+        return ""
+    delta = current - prior
+    arrow = "↑" if delta > 0 else "↓"
+    return f"{arrow} {abs(delta):.1%}"
+
+
+def _trend_class(current: float, prior: float) -> str:
+    if prior == 0:
+        return ""
+    return "trend-up" if current >= prior else "trend-down"
+
+
+def _group_by_type(emails: list[EmailRecord]) -> dict[str, list[EmailRecord]]:
+    groups: dict[str, list[EmailRecord]] = defaultdict(list)
+    for e in emails:
+        key = e.content_type or "unknown"
+        groups[key].append(e)
+    return dict(groups)
+
+
+def _aggregate(emails: list[EmailRecord]) -> dict:
+    sent = sum(e.sent for e in emails)
+    delivered = sum(e.delivered for e in emails)
+    opens = sum(e.unique_opens for e in emails)
+    clicks = sum(e.unique_clicks for e in emails)
+    bounced = sum(e.bounced for e in emails)
+    unsubscribed = sum(e.unsubscribed for e in emails)
+    open_rate = opens / delivered if delivered else 0
+    click_rate = clicks / delivered if delivered else 0
+    ctor = clicks / opens if opens else 0
+    bounce_rate = bounced / sent if sent else 0
+    unsubscribe_rate = unsubscribed / delivered if delivered else 0
+    delivered_rate = delivered / sent if sent else 0
+    return {
+        "count": len(emails),
+        "sent": sent,
+        "delivered": delivered,
+        "open_rate": open_rate,
+        "click_rate": click_rate,
+        "ctor": ctor,
+        "bounce_rate": bounce_rate,
+        "unsubscribe_rate": unsubscribe_rate,
+        "delivered_rate": delivered_rate,
+    }
+
+
+def _emails_to_json(emails: list[EmailRecord]) -> str:
+    records = []
+    for e in emails:
+        records.append({
+            "id": e.email_id,
+            "name": e.name,
+            "subject": e.subject,
+            "content_type": e.content_type or "unknown",
+            "campaign_name": e.campaign_name or "",
+            "send_date": e.send_date.strftime("%Y-%m-%d") if e.send_date else None,
+            "sent": e.sent,
+            "delivered": e.delivered,
+            "opens": e.unique_opens,
+            "clicks": e.unique_clicks,
+            "bounced": e.bounced,
+            "unsubscribed": e.unsubscribed,
+        })
+    return json.dumps(records)
+
+
+def _top_emails(emails: list[EmailRecord], n: int = 5) -> list[EmailRecord]:
+    # Only include emails with meaningful send volume
+    valid = [e for e in emails if e.delivered >= 50]
+    return sorted(valid, key=lambda e: e.open_rate, reverse=True)[:n]
+
+
+def _build_summary_rows(
+    current_groups: dict[str, list[EmailRecord]],
+    prior_groups: dict[str, list[EmailRecord]],
+) -> list[dict]:
+    rows = []
+    for ct, emails in sorted(current_groups.items(), key=lambda x: -len(x[1])):
+        if ct == "unknown":
+            continue
+        cur = _aggregate(emails)
+        prior_emails = prior_groups.get(ct, [])
+        pri = _aggregate(prior_emails) if prior_emails else None
+        rows.append({"type": ct, "current": cur, "prior": pri})
+    return rows
+
+
+def _render_html(
+    all_emails: list[EmailRecord],
+    rows: list[dict],
+    playbook: dict[str, dict],
+    current_groups: dict[str, list[EmailRecord]],
+    prior_groups: dict[str, list[EmailRecord]],
+    ai_summaries: dict[str, dict],
+    generated_at: datetime,
+    pipeline_data: Optional[dict] = None,
+) -> str:
+    now_str = generated_at.strftime("%B %d, %Y at %I:%M %p UTC")
+
+    # Embed all emails as JSON for client-side filtering
+    emails_json = _emails_to_json(all_emails)
+
+    # Build playbook panels (static — not affected by filters)
+    playbook_panels = ""
+    first = True
+    all_types = sorted(playbook.keys())
+
+    for ct in all_types:
+        data = playbook[ct]
+        anchor = ct.replace(" ", "-")
+        emails = current_groups.get(ct, [])
+        top = _top_emails(emails)
+        hidden = '' if first else 'style="display:none"'
+        first = False
+
+        if "status" in data:
+            count = data.get("sample_count", 0)
+            minimum = data.get("minimum_required", 5)
+            playbook_panels += f"""
+        <div id="panel-{anchor}" class="playbook-panel" {hidden}>
+            <p class="insufficient-note">⚠ Insufficient data ({count} emails, need {minimum}+ for reliable analysis)</p>
+        </div>"""
+            continue
+
+        top_emails_html = ""
+        for e in top:
+            top_emails_html += f"""
+                <tr>
+                    <td>{e.subject}</td>
+                    <td>{e.sent:,}</td>
+                    <td class="{_delta_class(e.open_rate, BENCHMARKS['open_rate'])}">{_pct(e.open_rate)}</td>
+                    <td class="{_delta_class(e.click_rate, BENCHMARKS['click_rate'])}">{_pct(e.click_rate)}</td>
+                </tr>"""
+        if not top_emails_html:
+            top_emails_html = '<tr><td colspan="4">No emails with 50+ recipients</td></tr>'
+
+        playbook_panels += f"""
+        <div id="panel-{anchor}" class="playbook-panel" {hidden}>
+            <div class="insights-grid">
+                <div class="insight-card">
+                    <h3>Subject Line Patterns</h3>
+                    <p>{data['subject_line_patterns']}</p>
+                </div>
+                <div class="insight-card">
+                    <h3>CTA Patterns</h3>
+                    <p>{data['cta_patterns']}</p>
+                </div>
+                <div class="insight-card">
+                    <h3>Timing Patterns</h3>
+                    <p>{data['timing_patterns']}</p>
+                </div>
+                <div class="insight-card">
+                    <h3>Data Note</h3>
+                    <p>{data['sample_size_note']}</p>
+                </div>
+            </div>
+            <h3 class="top-label">Top Performing Emails</h3>
+            <table class="top-emails">
+                <thead><tr><th>Subject</th><th>Sent</th><th>Open Rate</th><th>Click Rate</th></tr></thead>
+                <tbody>{top_emails_html}</tbody>
+            </table>
+        </div>"""
+
+    playbook_data_json = json.dumps({
+        ct.replace(" ", "-"): {"title": ct.title(), "count": playbook[ct].get("sample_count", "")}
+        for ct in all_types if "status" not in playbook[ct]
+    })
+    first_anchor = all_types[0].replace(" ", "-") if all_types else ""
+    first_title = all_types[0].title() if all_types else ""
+
+    # Card color palette (one per metric)
+    card_colors = [
+        ("#1e3a5f", "#4a9eff"),   # delivered rate — navy
+        ("#1a3a6b", "#2563eb"),   # open rate — blue
+        ("#1e3a5f", "#0ea5e9"),   # click rate — sky
+        ("#2d1f6e", "#7c3aed"),   # CTOR — purple
+        ("#4a1942", "#db2777"),   # unsubscribe — pink (inverted logic)
+        ("#4a1a1a", "#dc2626"),   # bounce — red (inverted logic)
+    ]
+
+    pipeline_data = pipeline_data or {}
+    pipeline_data_json = json.dumps(pipeline_data)
+    pipeline_campaigns = sorted(pipeline_data.keys())
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Reputation — Medallion</title>
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f8fafc; color: #1a1a2e; display: flex; height: 100vh; overflow: hidden; }}
+
+  /* ── Sidebar ── */
+  .sidebar {{
+    width: 220px;
+    min-width: 220px;
+    background: #f1f5f9;
+    border-right: 1px solid #e2e8f0;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    position: fixed;
+    top: 0; left: 0;
+    z-index: 100;
+  }}
+  .sidebar-logo {{
+    padding: 28px 24px 20px;
+    border-bottom: 1px solid #e2e8f0;
+  }}
+  .sidebar-logo h1 {{ font-size: 17px; font-weight: 700; color: #0f172a; letter-spacing: -0.02em; }}
+  .sidebar-logo p {{ font-size: 11px; color: #94a3b8; margin-top: 3px; }}
+  .sidebar-nav {{ flex: 1; padding: 12px 12px; display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }}
+  .nav-item {{
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 500;
+    color: #475569;
+    cursor: pointer;
+    border: none;
+    background: none;
+    transition: color 0.12s, background 0.12s;
+    letter-spacing: 0;
+  }}
+  .nav-item:hover {{ color: #0f172a; background: #e2e8f0; }}
+  .nav-item.active {{ color: #5b21b6; background: #ede9fe; font-weight: 600; }}
+  .sidebar-footer {{
+    padding: 16px 24px;
+    font-size: 11px;
+    color: #94a3b8;
+    border-top: 1px solid #e2e8f0;
+  }}
+
+  /* ── Main content ── */
+  .content-area {{
+    margin-left: 220px;
+    flex: 1;
+    height: 100vh;
+    overflow-y: auto;
+    background: #f8fafc;
+  }}
+  .view {{ display: none; max-width: 1100px; margin: 0 auto; padding: 32px 28px; }}
+  .view.active {{ display: block; }}
+  .view-title {{ font-size: 22px; font-weight: 700; color: #1a1a2e; margin-bottom: 24px; }}
+
+  /* ── Filters ── */
+  .filters {{ display: flex; gap: 12px; margin-bottom: 20px; align-items: center; flex-wrap: wrap; }}
+  .filter-group {{ display: flex; flex-direction: column; gap: 4px; }}
+  .filter-group label {{ font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: #64748b; }}
+  .filters select, .filters input[type=date] {{
+    background: white; border: 1px solid #e2e8f0; border-radius: 8px;
+    padding: 8px 12px; font-size: 13px; color: #1a1a2e; cursor: pointer;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04); min-width: 160px;
+  }}
+  .filters select:focus, .filters input[type=date]:focus {{ outline: none; border-color: #5b21b6; }}
+  .filter-sep {{ color: #cbd5e1; font-size: 18px; align-self: flex-end; padding-bottom: 8px; }}
+
+  /* ── Metric cards ── */
+  .metric-bar {{ display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; margin-bottom: 28px; }}
+  .metric-card {{ border-radius: 14px; padding: 20px 18px; color: white; position: relative; overflow: hidden; }}
+  .metric-label {{ font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; opacity: 0.7; margin-bottom: 10px; }}
+  .metric-value {{ font-size: 30px; font-weight: 800; line-height: 1; margin-bottom: 8px; }}
+  .metric-delta {{ font-size: 12px; opacity: 0.85; }}
+  .metric-benchmark {{ font-size: 11px; opacity: 0.45; margin-top: 4px; }}
+  .metric-delta.up-good {{ color: #86efac; }}
+  .metric-delta.down-good {{ color: #86efac; }}
+  .metric-delta.up-bad {{ color: #fca5a5; }}
+  .metric-delta.down-bad {{ color: #fca5a5; }}
+
+  /* ── Summary table ── */
+  .section-title {{ font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: #64748b; margin-bottom: 12px; }}
+  .summary-card {{ background: white; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.07); margin-bottom: 28px; overflow: hidden; }}
+  table {{ width: 100%; border-collapse: collapse; font-size: 14px; }}
+  thead {{ background: #f8fafc; }}
+  th {{ padding: 11px 16px; text-align: left; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: #94a3b8; }}
+  td {{ padding: 12px 16px; border-bottom: 1px solid #f1f5f9; }}
+  tr:last-child td {{ border-bottom: none; }}
+  .benchmark-row td {{ font-size: 12px; color: #cbd5e1; font-style: italic; background: #fafafa; }}
+  .data-row {{ cursor: pointer; transition: background 0.1s; }}
+  .data-row:hover {{ background: #f8fafc; }}
+  .data-row.active {{ background: #f5f3ff; }}
+  .data-row.active .type-cell {{ color: #5b21b6; font-weight: 600; }}
+  .type-cell {{ text-transform: capitalize; font-weight: 500; }}
+  td.good {{ color: #16a34a; font-weight: 600; }}
+  td.ok {{ color: #d97706; font-weight: 600; }}
+  td.bad {{ color: #dc2626; font-weight: 600; }}
+
+  /* ── Playbook ── */
+  .playbook-header {{ display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }}
+  .playbook-header h2 {{ font-size: 17px; font-weight: 600; text-transform: capitalize; }}
+  .playbook-header .sample-count {{ font-size: 13px; color: #94a3b8; font-weight: 400; margin-left: 8px; }}
+  .select-styled {{
+    appearance: none;
+    background: white url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%2364748b' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 12px center;
+    border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px 36px 8px 14px;
+    font-size: 13px; font-weight: 500; color: #1a1a2e; cursor: pointer; min-width: 180px;
+  }}
+  .playbook-card {{ background: white; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.07); padding: 24px; }}
+  .insights-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px; }}
+  .insight-card {{ background: #f8fafc; border-radius: 8px; padding: 14px; }}
+  .insight-card h3 {{ font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: #94a3b8; margin-bottom: 7px; }}
+  .insight-card p {{ font-size: 13px; line-height: 1.65; color: #374151; }}
+  .top-label {{ font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: #94a3b8; margin-bottom: 8px; }}
+  .top-emails thead {{ background: #f8fafc; }}
+  .top-emails th, .top-emails td {{ padding: 9px 12px; font-size: 13px; }}
+  .insufficient-note {{ color: #d97706; font-size: 14px; padding: 8px 0; }}
+
+  /* ── AI Summary ── */
+  .ai-summary-card {{ background: #fafbff; border: 1px solid #e0e7ff; border-radius: 12px; padding: 20px 24px; margin-bottom: 28px; }}
+  .ai-summary-header {{ display: flex; align-items: center; gap: 8px; margin-bottom: 12px; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: #6366f1; }}
+  .ai-summary-text {{ font-size: 14px; line-height: 1.65; color: #374151; margin-bottom: 12px; }}
+  .ai-summary-recs {{ list-style: none; padding: 0; display: flex; flex-direction: column; gap: 6px; }}
+  .ai-summary-recs li {{ font-size: 13px; color: #374151; padding-left: 18px; position: relative; line-height: 1.5; }}
+  .ai-summary-recs li::before {{ content: "→"; position: absolute; left: 0; color: #6366f1; font-weight: 700; }}
+  .ai-summary-note {{ font-size: 11px; color: #94a3b8; margin-top: 10px; }}
+
+  /* ── Pipeline ── */
+  .pipeline-selector {{ margin-bottom: 24px; }}
+  .pipeline-selector label {{ font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: #64748b; display: block; margin-bottom: 6px; }}
+  .pipeline-selector select {{ background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 9px 14px; font-size: 13px; color: #1a1a2e; cursor: pointer; box-shadow: 0 1px 2px rgba(0,0,0,0.04); min-width: 260px; }}
+  .pipeline-meta {{ font-size: 13px; color: #64748b; margin-bottom: 20px; }}
+  .pipeline-meta strong {{ color: #1a1a2e; }}
+  .pipeline-cards {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 28px; }}
+  .pipeline-card {{ background: white; border-radius: 14px; padding: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.07); }}
+  .pipeline-card-label {{ font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em; color: #94a3b8; margin-bottom: 8px; }}
+  .pipeline-card-value {{ font-size: 26px; font-weight: 800; color: #1a1a2e; line-height: 1; margin-bottom: 4px; }}
+  .pipeline-card-sub {{ font-size: 12px; color: #64748b; }}
+  .pipeline-card-post {{ font-size: 12px; color: #16a34a; font-weight: 600; margin-top: 6px; }}
+  .pipeline-section-title {{ font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: #64748b; margin-bottom: 12px; }}
+  .pipeline-table-wrap {{ background: white; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.07); overflow: hidden; margin-bottom: 24px; }}
+  .post-send-badge {{ display: inline-block; background: #dcfce7; color: #15803d; font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 99px; letter-spacing: 0.04em; margin-left: 6px; vertical-align: middle; }}
+  .pipeline-disclaimer {{ font-size: 12px; color: #94a3b8; margin-top: 8px; font-style: italic; }}
+  .pipeline-empty {{ color: #94a3b8; font-size: 15px; padding: 60px; text-align: center; background: white; border-radius: 12px; }}
+
+  /* ── Placeholder views ── */
+  .placeholder-card {{ background: white; border-radius: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.07); padding: 64px 40px; text-align: center; max-width: 480px; margin: 60px auto 0; }}
+  .placeholder-card h2 {{ font-size: 20px; font-weight: 700; color: #1a1a2e; margin-bottom: 10px; }}
+  .placeholder-card p {{ font-size: 14px; color: #64748b; line-height: 1.6; }}
+  .placeholder-badge {{ display: inline-block; background: #f3f0ff; color: #5b21b6; font-size: 11px; font-weight: 700; letter-spacing: 0.07em; padding: 4px 12px; border-radius: 99px; margin-bottom: 20px; text-transform: uppercase; }}
+
+  /* ── Settings ── */
+  .settings-section {{ background: white; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.07); padding: 24px; margin-bottom: 20px; }}
+  .settings-section h3 {{ font-size: 14px; font-weight: 600; color: #1a1a2e; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid #f1f5f9; }}
+  .settings-row {{ display: flex; align-items: center; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #f8fafc; }}
+  .settings-row:last-child {{ border-bottom: none; }}
+  .settings-row-label {{ font-size: 13px; color: #374151; font-weight: 500; }}
+  .settings-row-value {{ font-size: 13px; color: #64748b; }}
+  .status-dot {{ display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }}
+  .status-dot.green {{ background: #16a34a; }}
+  .status-dot.red {{ background: #dc2626; }}
+
+  @media (max-width: 900px) {{
+    .sidebar {{ width: 180px; min-width: 180px; }}
+    .content-area {{ margin-left: 180px; }}
+    .metric-bar {{ grid-template-columns: repeat(3, 1fr); }}
+    .insights-grid {{ grid-template-columns: 1fr; }}
+    .pipeline-cards {{ grid-template-columns: 1fr 1fr; }}
+    .view {{ padding: 20px 16px; }}
+  }}
+</style>
+</head>
+<body>
+
+<!-- Sidebar -->
+<aside class="sidebar">
+  <div class="sidebar-logo">
+    <h1>Reputation</h1>
+    <p>Medallion</p>
+  </div>
+  <nav class="sidebar-nav">
+    <button class="nav-item active" onclick="switchView('dashboard', this)">Dashboard</button>
+    <button class="nav-item" onclick="switchView('analyzer', this)">Analyzer</button>
+    <button class="nav-item" onclick="switchView('pipeline', this)">Pipeline</button>
+    <button class="nav-item" onclick="switchView('cowrite', this)">Co-write</button>
+    <button class="nav-item" onclick="switchView('settings', this)">Settings</button>
+  </nav>
+  <div class="sidebar-footer">Updated {now_str}</div>
+</aside>
+
+<!-- Main content -->
+<div class="content-area">
+
+  <!-- Dashboard -->
+  <div id="view-dashboard" class="view active">
+    <div class="filters">
+      <div class="filter-group">
+        <label>From</label>
+        <input type="date" id="filter-from" onchange="applyFilters()">
+      </div>
+      <div class="filter-sep">–</div>
+      <div class="filter-group">
+        <label>To</label>
+        <input type="date" id="filter-to" onchange="applyFilters()">
+      </div>
+      <div class="filter-group">
+        <label>Content Type</label>
+        <select id="filter-type" onchange="applyFilters()">
+          <option value="">All types</option>
+        </select>
+      </div>
+      <div class="filter-group">
+        <label>Campaign</label>
+        <select id="filter-campaign" onchange="applyFilters()">
+          <option value="">All campaigns</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="metric-bar" id="metric-bar">
+      <div class="metric-card" style="background:linear-gradient(135deg,#1e3a5f,#2563eb)">
+        <div class="metric-label">Delivered Rate</div>
+        <div class="metric-value" id="val-delivered">—</div>
+        <div class="metric-delta" id="delta-delivered"></div>
+      </div>
+      <div class="metric-card" style="background:linear-gradient(135deg,#1a3a6b,#3b82f6)">
+        <div class="metric-label">Open Rate</div>
+        <div class="metric-value" id="val-open">—</div>
+        <div class="metric-delta" id="delta-open"></div>
+        <div class="metric-benchmark">Benchmark: 19%</div>
+      </div>
+      <div class="metric-card" style="background:linear-gradient(135deg,#0c4a6e,#0ea5e9)">
+        <div class="metric-label">Click Rate</div>
+        <div class="metric-value" id="val-click">—</div>
+        <div class="metric-delta" id="delta-click"></div>
+      </div>
+      <div class="metric-card" style="background:linear-gradient(135deg,#2d1f6e,#7c3aed)">
+        <div class="metric-label">CTOR</div>
+        <div class="metric-value" id="val-ctor">—</div>
+        <div class="metric-delta" id="delta-ctor"></div>
+        <div class="metric-benchmark">Benchmark: 7.5%</div>
+      </div>
+      <div class="metric-card" style="background:linear-gradient(135deg,#4a1942,#db2777)">
+        <div class="metric-label">Unsubscribe Rate</div>
+        <div class="metric-value" id="val-unsub">—</div>
+        <div class="metric-delta" id="delta-unsub"></div>
+        <div class="metric-benchmark">Benchmark: 0.5%</div>
+      </div>
+      <div class="metric-card" style="background:linear-gradient(135deg,#4a1a1a,#dc2626)">
+        <div class="metric-label">Bounce Rate</div>
+        <div class="metric-value" id="val-bounce">—</div>
+        <div class="metric-delta" id="delta-bounce"></div>
+        <div class="metric-benchmark">Benchmark: 0.25%</div>
+      </div>
+    </div>
+
+    <div class="ai-summary-card">
+      <div class="ai-summary-header"><span class="sparkle">✦</span> AI Summary</div>
+      <p class="ai-summary-text" id="ai-summary-text">Loading…</p>
+      <ul class="ai-summary-recs" id="ai-summary-recs"></ul>
+      <p class="ai-summary-note" id="ai-summary-note"></p>
+    </div>
+
+    <p class="section-title">By Content Type</p>
+    <div class="summary-card">
+      <table>
+        <thead>
+          <tr>
+            <th>Content Type</th><th>Emails</th><th>Total Sent</th>
+            <th>Open Rate</th><th>Click Rate</th><th>CTOR</th>
+          </tr>
+        </thead>
+        <tbody id="summary-tbody"></tbody>
+      </table>
+    </div>
+  </div><!-- /dashboard -->
+
+  <!-- Analyzer -->
+  <div id="view-analyzer" class="view">
+    <div class="playbook-header">
+      <h2 id="playbook-title">{first_title} <span class="sample-count" id="playbook-count"></span></h2>
+      <select class="select-styled" id="type-picker" onchange="selectType(this.value)">
+        <option value="">— select type —</option>
+      </select>
+    </div>
+    <div class="playbook-card">
+      {playbook_panels}
+    </div>
+  </div><!-- /analyzer -->
+
+  <!-- Pipeline -->
+  <div id="view-pipeline" class="view">
+    <div class="pipeline-selector">
+      <label>Campaign</label>
+      <select id="pipeline-campaign-picker" onchange="loadPipeline(this.value)">
+        <option value="">— select a campaign —</option>
+      </select>
+    </div>
+    <div id="pipeline-content">
+      <div class="pipeline-empty">Select a campaign above to see associated pipeline.</div>
+    </div>
+  </div><!-- /pipeline -->
+
+  <!-- Co-write -->
+  <div id="view-cowrite" class="view">
+    <div class="placeholder-card">
+      <div class="placeholder-badge">Coming Soon</div>
+      <h2>Co-write</h2>
+      <p>Brief-to-draft email writer powered by Claude. Paste a campaign brief and get a ready-to-send email draft in seconds, tailored to your content type and audience.</p>
+    </div>
+  </div><!-- /cowrite -->
+
+  <!-- Settings -->
+  <div id="view-settings" class="view">
+    <p class="view-title">Settings</p>
+    <div class="settings-section">
+      <h3>Connections</h3>
+      <div class="settings-row">
+        <span class="settings-row-label">HubSpot</span>
+        <span class="settings-row-value"><span class="status-dot green"></span>Connected</span>
+      </div>
+      <div class="settings-row">
+        <span class="settings-row-label">Salesforce</span>
+        <span class="settings-row-value"><span class="status-dot green"></span>Connected</span>
+      </div>
+      <div class="settings-row">
+        <span class="settings-row-label">Anthropic AI</span>
+        <span class="settings-row-value"><span class="status-dot green"></span>Connected</span>
+      </div>
+    </div>
+    <div class="settings-section">
+      <h3>Report Defaults</h3>
+      <div class="settings-row">
+        <span class="settings-row-label">Lookback window</span>
+        <span class="settings-row-value">365 days</span>
+      </div>
+      <div class="settings-row">
+        <span class="settings-row-label">Pipeline campaigns</span>
+        <span class="settings-row-value">Top 10 by volume</span>
+      </div>
+      <div class="settings-row">
+        <span class="settings-row-label">Internal domain filter</span>
+        <span class="settings-row-value">@medallion.co excluded</span>
+      </div>
+      <div class="settings-row">
+        <span class="settings-row-label">Scheduled refresh</span>
+        <span class="settings-row-value">Daily at 5:00 AM PT</span>
+      </div>
+    </div>
+    <div class="settings-section">
+      <h3>Benchmarks</h3>
+      <div class="settings-row">
+        <span class="settings-row-label">Open Rate</span>
+        <span class="settings-row-value">19%</span>
+      </div>
+      <div class="settings-row">
+        <span class="settings-row-label">CTOR</span>
+        <span class="settings-row-value">7.5%</span>
+      </div>
+      <div class="settings-row">
+        <span class="settings-row-label">Unsubscribe Rate</span>
+        <span class="settings-row-value">0.5%</span>
+      </div>
+      <div class="settings-row">
+        <span class="settings-row-label">Bounce Rate</span>
+        <span class="settings-row-value">0.25%</span>
+      </div>
+    </div>
+  </div><!-- /settings -->
+
+</div><!-- /content-area -->
+
+<script>
+const ALL_EMAILS = {emails_json};
+const PLAYBOOK = {playbook_data_json};
+const AI_SUMMARIES = {json.dumps(ai_summaries)};
+const PIPELINE_DATA = {pipeline_data_json};
+
+// ── Sidebar navigation ──────────────────────────────────────────
+function switchView(name, btn) {{
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
+  document.getElementById('view-' + name).classList.add('active');
+  btn.classList.add('active');
+}}
+
+// ── Pipeline ────────────────────────────────────────────────────
+const pipelineCampaigns = Object.keys(PIPELINE_DATA).sort();
+pipelineCampaigns.forEach(name => {{
+  const opt = document.createElement('option');
+  opt.value = name;
+  opt.textContent = name;
+  document.getElementById('pipeline-campaign-picker').appendChild(opt);
+}});
+
+function fmt$(n) {{
+  if (n >= 1e6) return '$' + (n/1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return '$' + Math.round(n/1e3) + 'K';
+  return '$' + n.toLocaleString();
+}}
+
+function loadPipeline(campaignName) {{
+  const el = document.getElementById('pipeline-content');
+  if (!campaignName || !PIPELINE_DATA[campaignName]) {{
+    el.innerHTML = '<div class="pipeline-empty">Select a campaign above to see associated pipeline.</div>';
+    return;
+  }}
+  const d = PIPELINE_DATA[campaignName];
+  const matchPct = Math.round(d.match_rate * 100);
+
+  const postContact = d.contact_post_count > 0
+    ? `<div class="pipeline-card-post">★ ${{d.contact_post_count}} opps (${{fmt$(d.contact_post_value)}}) created post-send</div>` : '';
+  const postAccount = d.account_post_count > 0
+    ? `<div class="pipeline-card-post">★ ${{d.account_post_count}} opps (${{fmt$(d.account_post_value)}}) created post-send</div>` : '';
+
+  let oppsRows = '';
+  (d.top_opps || []).forEach(o => {{
+    const badge = o.post_send ? '<span class="post-send-badge">POST-SEND</span>' : '';
+    oppsRows += `<tr>
+      <td>${{o.account}}${{badge}}</td>
+      <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${{o.name}}</td>
+      <td>${{o.stage}}</td>
+      <td style="text-align:right;font-weight:700">${{fmt$(o.amount)}}</td>
+    </tr>`;
+  }});
+  if (!oppsRows) oppsRows = '<tr><td colspan="4" style="color:#94a3b8">No open contact-level opportunities found.</td></tr>';
+
+  el.innerHTML = `
+    <div class="pipeline-meta">
+      Sent ${{d.send_date}} &nbsp;·&nbsp;
+      <strong>${{d.total_matched}}</strong> of ${{d.total_engaged}} engaged contacts matched in Salesforce (${{matchPct}}%)
+    </div>
+    <div class="pipeline-cards">
+      <div class="pipeline-card">
+        <div class="pipeline-card-label">Contact-Level Open Pipeline</div>
+        <div class="pipeline-card-value">${{fmt$(d.contact_open_value)}}</div>
+        <div class="pipeline-card-sub">${{d.contact_open_count}} opportunities</div>
+        ${{postContact}}
+      </div>
+      <div class="pipeline-card">
+        <div class="pipeline-card-label">Account-Level Open Pipeline</div>
+        <div class="pipeline-card-value">${{fmt$(d.account_open_value)}}</div>
+        <div class="pipeline-card-sub">${{d.account_open_count}} opportunities</div>
+        ${{postAccount}}
+      </div>
+      <div class="pipeline-card">
+        <div class="pipeline-card-label">Won Revenue (contact-level)</div>
+        <div class="pipeline-card-value">${{fmt$(d.contact_won_value)}}</div>
+        <div class="pipeline-card-sub">${{d.contact_won_count}} closed-won deals</div>
+      </div>
+    </div>
+
+    <p class="pipeline-section-title">Top Open Opportunities (contact-level)</p>
+    <div class="pipeline-table-wrap">
+      <table>
+        <thead><tr><th>Account</th><th>Opportunity</th><th>Stage</th><th style="text-align:right">Amount</th></tr></thead>
+        <tbody>${{oppsRows}}</tbody>
+      </table>
+    </div>
+    <p class="pipeline-disclaimer">★ = opportunity created after the email send date — stronger association signal. All figures use Opportunity_Amount__c. Labeled "associated", not attributed.</p>
+  `;
+}}
+
+// Auto-load first pipeline campaign if available
+if (pipelineCampaigns.length > 0) {{
+  document.getElementById('pipeline-campaign-picker').value = pipelineCampaigns[0];
+  loadPipeline(pipelineCampaigns[0]);
+}}
+
+// Populate type filter and playbook picker from data
+const typeSet = new Set(ALL_EMAILS.map(e => e.content_type).filter(t => t && t !== 'unknown'));
+const types = [...typeSet].sort();
+types.forEach(t => {{
+  ['filter-type', 'type-picker'].forEach(id => {{
+    const opt = document.createElement('option');
+    opt.value = t.replace(/ /g, '-');
+    opt.textContent = t.replace(/\\b\\w/g, c => c.toUpperCase());
+    document.getElementById(id).appendChild(opt.cloneNode(true));
+  }});
+}});
+
+// Populate campaign filter from campaign_name field
+const campaigns = [...new Set(ALL_EMAILS.map(e => e.campaign_name).filter(Boolean))].sort();
+campaigns.forEach(name => {{
+  const opt = document.createElement('option');
+  opt.value = name;
+  opt.textContent = name.length > 60 ? name.slice(0, 60) + '…' : name;
+  document.getElementById('filter-campaign').appendChild(opt);
+}});
+
+// Set default date range: last 30 days
+function toISO(d) {{ return d.toISOString().split('T')[0]; }}
+const today = new Date();
+const d30 = new Date(today); d30.setDate(today.getDate() - 30);
+document.getElementById('filter-to').value = toISO(today);
+document.getElementById('filter-from').value = toISO(d30);
+
+function pct(v) {{ return (v * 100).toFixed(1) + '%'; }}
+
+function agg(emails) {{
+  let sent=0, delivered=0, opens=0, clicks=0, bounced=0, unsubscribed=0;
+  emails.forEach(e => {{
+    sent += e.sent; delivered += e.delivered; opens += e.opens;
+    clicks += e.clicks; bounced += e.bounced; unsubscribed += e.unsubscribed;
+  }});
+  return {{
+    count: emails.length, sent, delivered, opens, clicks, bounced, unsubscribed,
+    delivered_rate: sent ? delivered/sent : 0,
+    open_rate: delivered ? opens/delivered : 0,
+    click_rate: delivered ? clicks/delivered : 0,
+    ctor: opens ? clicks/opens : 0,
+    unsub_rate: delivered ? unsubscribed/delivered : 0,
+    bounce_rate: sent ? bounced/sent : 0,
+  }};
+}}
+
+function filterEmails(from, to, type, campaign) {{
+  return ALL_EMAILS.filter(e => {{
+    if (!e.send_date) return false;
+    if (from && e.send_date < from) return false;
+    if (to && e.send_date > to) return false;
+    if (type && e.content_type.replace(/ /g,'-') !== type) return false;
+    if (campaign && e.campaign_name !== campaign) return false;
+    return true;
+  }});
+}}
+
+function priorRange(from, to) {{
+  const f = new Date(from), t = new Date(to);
+  const days = Math.round((t-f)/(1000*86400));
+  const pf = new Date(f); pf.setDate(pf.getDate()-days);
+  const pt = new Date(f); pt.setDate(pt.getDate()-1);
+  return [toISO(pf), toISO(pt)];
+}}
+
+function setCard(valId, deltaId, value, priorValue, invert) {{
+  document.getElementById(valId).textContent = pct(value);
+  if (priorValue === null) {{ document.getElementById(deltaId).textContent = ''; return; }}
+  const delta = value - priorValue;
+  const arrow = delta >= 0 ? '↑' : '↓';
+  const isGood = invert ? delta <= 0 : delta >= 0;
+  const cls = (delta >= 0 ? 'up-' : 'down-') + (isGood ? 'good' : 'bad');
+  const el = document.getElementById(deltaId);
+  el.textContent = arrow + ' ' + pct(Math.abs(delta)) + ' vs prev period';
+  el.className = 'metric-delta ' + cls;
+}}
+
+function applyFilters() {{
+  const from = document.getElementById('filter-from').value;
+  const to = document.getElementById('filter-to').value;
+  const type = document.getElementById('filter-type').value;
+  const campaign = document.getElementById('filter-campaign').value;
+
+  const current = filterEmails(from, to, type, campaign);
+  const [pf, pt] = priorRange(from, to);
+  const prior = filterEmails(pf, pt, type, campaign);
+
+  const c = agg(current);
+  const p = prior.length ? agg(prior) : null;
+
+  setCard('val-delivered','delta-delivered', c.delivered_rate, p?.delivered_rate??null, false);
+  setCard('val-open','delta-open', c.open_rate, p?.open_rate??null, false);
+  setCard('val-click','delta-click', c.click_rate, p?.click_rate??null, false);
+  setCard('val-ctor','delta-ctor', c.ctor, p?.ctor??null, false);
+  setCard('val-unsub','delta-unsub', c.unsub_rate, p?.unsub_rate??null, true);
+  setCard('val-bounce','delta-bounce', c.bounce_rate, p?.bounce_rate??null, true);
+
+  updateAiSummary(type, campaign);
+
+  // Update summary table
+  const byType = {{}};
+  current.forEach(e => {{
+    const k = e.content_type || 'unknown';
+    if (!byType[k]) byType[k] = [];
+    byType[k].push(e);
+  }});
+  const tbody = document.getElementById('summary-tbody');
+  tbody.innerHTML = '';
+  Object.entries(byType)
+    .filter(([k]) => k !== 'unknown')
+    .sort((a,b) => b[1].length - a[1].length)
+    .forEach(([ct, emails]) => {{
+      const a = agg(emails);
+      const anchor = ct.replace(/ /g,'-');
+      const orCls = a.open_rate >= 0.385 ? 'good' : a.open_rate >= 0.2975 ? 'ok' : 'bad';
+      const crCls = a.click_rate >= 0.033 ? 'good' : a.click_rate >= 0.0255 ? 'ok' : 'bad';
+      const ctCls = a.ctor >= 0.11 ? 'good' : a.ctor >= 0.085 ? 'ok' : 'bad';
+      tbody.innerHTML += `<tr class="data-row" data-target="${{anchor}}" onclick="selectType('${{anchor}}'); switchView('analyzer', document.querySelector('.nav-item:nth-child(2)'))">
+        <td class="type-cell">${{ct}}</td>
+        <td>${{a.count}}</td>
+        <td>${{a.sent.toLocaleString()}}</td>
+        <td class="${{orCls}}">${{pct(a.open_rate)}}</td>
+        <td class="${{crCls}}">${{pct(a.click_rate)}}</td>
+        <td class="${{ctCls}}">${{pct(a.ctor)}}</td>
+      </tr>`;
+    }});
+  tbody.innerHTML += `<tr class="benchmark-row"><td colspan="3">B2B SaaS benchmark</td><td>35%</td><td>3%</td><td>10%</td></tr>`;
+}}
+
+function updateAiSummary(typeFilter, campaignFilter) {{
+  // Campaign takes priority, then content type, then overall
+  let key, note = '';
+  if (campaignFilter) {{
+    key = 'campaign::' + campaignFilter;
+    if (!AI_SUMMARIES[key]) {{
+      key = 'overall';
+      note = 'No pre-generated summary for this campaign. Re-run the report to generate one.';
+    }}
+  }} else if (typeFilter) {{
+    key = typeFilter.replace(/-/g,' ');
+    if (!AI_SUMMARIES[key]) key = 'overall';
+  }} else {{
+    key = 'overall';
+  }}
+
+  const data = AI_SUMMARIES[key] || {{"summary": "—", "recommendations": []}};
+  document.getElementById('ai-summary-text').textContent = data.summary || '—';
+
+  const recsEl = document.getElementById('ai-summary-recs');
+  recsEl.innerHTML = '';
+  (data.recommendations || []).forEach(r => {{
+    const li = document.createElement('li');
+    li.textContent = r;
+    recsEl.appendChild(li);
+  }});
+
+  document.getElementById('ai-summary-note').textContent = note;
+}}
+
+function selectType(anchor) {{
+  document.querySelectorAll('.playbook-panel').forEach(p => p.style.display = 'none');
+  const panel = document.getElementById('panel-' + anchor);
+  if (panel) panel.style.display = '';
+  const info = PLAYBOOK[anchor];
+  if (info) {{
+    document.getElementById('playbook-title').childNodes[0].textContent = info.title + ' ';
+    document.getElementById('playbook-count').textContent = info.count ? info.count + ' emails' : '';
+  }}
+  document.getElementById('type-picker').value = anchor;
+  document.querySelectorAll('.data-row').forEach(r => r.classList.remove('active'));
+  const row = document.querySelector(`.data-row[data-target="${{anchor}}"]`);
+  if (row) row.classList.add('active');
+}}
+
+// Init
+applyFilters();
+selectType('{first_anchor}');
+document.getElementById('type-picker').value = '{first_anchor}';
+</script>
+</body>
+</html>"""
+
+
+def generate_report(
+    *,
+    days: int = 365,
+    push: bool = True,
+    token: Optional[str] = None,
+) -> str:
+    print("Fetching current period emails (last 365 days)…")
+    current = fetch_emails(days=365, token=token)
+
+    print("Fetching prior period emails (365–730 days ago)…")
+    all_730 = fetch_emails(days=730, token=token)
+    prior = [e for e in all_730 if e not in current]
+
+    current_groups = _group_by_type(current)
+    prior_groups = _group_by_type(prior)
+
+    print("Running analyzer…")
+    playbook = build_playbook(days=days, token=token)
+
+    # Generate AI summaries per content type + overall
+    print("\nGenerating AI summaries…")
+    all_current = [e for e in current if e.content_type]
+    all_prior = [e for e in prior if e.content_type]
+    ov_cur = _aggregate(all_current)
+    ov_pri = _aggregate(all_prior) if all_prior else None
+
+    ai_summaries = {}
+    print("  [overall]…")
+    try:
+        ai_summaries["overall"] = _generate_ai_summary("All content types", ov_cur, ov_pri)
+        print("    ✓")
+    except Exception as e:
+        print(f"    ✗ {e}")
+        ai_summaries["overall"] = {"summary": "", "recommendations": []}
+
+    for ct, emails in sorted(current_groups.items(), key=lambda x: -len(x[1])):
+        if ct == "unknown" or len(emails) < 5:
+            continue
+        print(f"  [{ct}]…")
+        try:
+            prior_emails = prior_groups.get(ct, [])
+            ai_summaries[ct] = _generate_ai_summary(
+                ct.title(), _aggregate(emails),
+                _aggregate(prior_emails) if prior_emails else None
+            )
+            print("    ✓")
+        except Exception as e:
+            print(f"    ✗ {e}")
+            ai_summaries[ct] = {"summary": "", "recommendations": []}
+
+    # Per-campaign summaries
+    campaign_groups: dict[str, list[EmailRecord]] = defaultdict(list)
+    for e in current:
+        if e.campaign_name:
+            campaign_groups[e.campaign_name].append(e)
+    prior_campaign_groups: dict[str, list[EmailRecord]] = defaultdict(list)
+    for e in prior:
+        if e.campaign_name:
+            prior_campaign_groups[e.campaign_name].append(e)
+
+    for campaign, emails in sorted(campaign_groups.items(), key=lambda x: -len(x[1])):
+        if len(emails) < 3:
+            continue
+        key = f"campaign::{campaign}"
+        print(f"  [campaign: {campaign}]…")
+        try:
+            prior_emails = prior_campaign_groups.get(campaign, [])
+            ai_summaries[key] = _generate_ai_summary(
+                campaign, _aggregate(emails),
+                _aggregate(prior_emails) if prior_emails else None
+            )
+            print("    ✓")
+        except Exception as e:
+            print(f"    ✗ {e}")
+            ai_summaries[key] = {"summary": "", "recommendations": []}
+
+    # Pipeline association (requires Salesforce credentials)
+    pipeline_data: dict = {}
+    PIPELINE_AVAILABLE = _PIPELINE_IMPORT_OK and bool(os.environ.get("SF_USERNAME"))
+    if PIPELINE_AVAILABLE:
+        print("\nGenerating pipeline association data…")
+        campaign_id_map: dict[str, list[str]] = defaultdict(list)
+        for e in current:
+            if e.campaign_name and e.campaign_ids:
+                for cid in e.campaign_ids:
+                    if cid not in campaign_id_map[e.campaign_name]:
+                        campaign_id_map[e.campaign_name].append(cid)
+
+        # Top 10 campaigns by email count
+        top_campaigns = sorted(
+            [(name, ids) for name, ids in campaign_id_map.items()],
+            key=lambda x: -len([e for e in current if e.campaign_name == x[0]]),
+        )[:10]
+
+        for campaign_name, campaign_ids in top_campaigns:
+            print(f"  [{campaign_name}]…")
+            try:
+                # Use the first (most recent) campaign ID for this campaign
+                result = analyze_campaign_pipeline(campaign_ids[0], hs_token=token)
+                pipeline_data[campaign_name] = result.to_dict()
+                print(f"    ✓ {result.total_matched} contacts matched")
+            except Exception as e:
+                print(f"    ✗ {e}")
+    else:
+        print("\nSkipping pipeline (SF credentials not configured).")
+
+    rows = _build_summary_rows(current_groups, prior_groups)
+    generated_at = datetime.now(tz=timezone.utc)
+    html = _render_html(all_730, rows, playbook, current_groups, prior_groups, ai_summaries, generated_at, pipeline_data)
+
+    output_path = os.path.join(os.path.dirname(__file__), "index.html")
+    with open(output_path, "w") as f:
+        f.write(html)
+    print(f"\nReport written to {output_path}")
+
+    if push:
+        _git_push(output_path)
+
+    return output_path
+
+
+def _git_push(filepath: str) -> None:
+    repo_dir = os.path.dirname(filepath)
+    try:
+        subprocess.run(["git", "add", "index.html"], cwd=repo_dir, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", f"Update report {datetime.now().strftime('%Y-%m-%d %H:%M')}"],
+            cwd=repo_dir,
+            check=True,
+        )
+        subprocess.run(["git", "push"], cwd=repo_dir, check=True)
+        print("Pushed to GitHub — dashboard will update in ~30 seconds.")
+    except subprocess.CalledProcessError as e:
+        print(f"Git push failed: {e}")
+
+
+if __name__ == "__main__":
+    generate_report()

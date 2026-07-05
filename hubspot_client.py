@@ -76,6 +76,7 @@ class EmailRecord:
     subject: str
     email_type: Optional[str]        # HubSpot send type: BATCH_EMAIL, AUTOMATED_EMAIL, etc.
     content_type: Optional[str]      # Parsed from name convention: webinar, newsletter, etc.
+    campaign_name: Optional[str]     # HubSpot campaign name (e.g. "Elevate 2026")
     send_date: Optional[datetime]
     campaign_ids: list[str] = field(default_factory=list)
 
@@ -85,10 +86,15 @@ class EmailRecord:
     unique_opens: int = 0
     clicks: int = 0
     unique_clicks: int = 0
+    bounced: int = 0
+    unsubscribed: int = 0
 
     open_rate: float = 0.0          # unique opens / delivered
     click_rate: float = 0.0         # unique clicks / delivered
     click_to_open_rate: float = 0.0 # unique clicks / unique opens
+    bounce_rate: float = 0.0        # bounced / sent
+    unsubscribe_rate: float = 0.0   # unsubscribed / delivered
+    delivered_rate: float = 0.0     # delivered / sent
 
 
 def _session(token: str) -> requests.Session:
@@ -139,6 +145,8 @@ def _build_record(email: dict, stats: dict) -> EmailRecord:
     unique_opens = opens          # v1 API doesn't expose unique opens separately
     clicks = int(stats.get("click", 0))
     unique_clicks = clicks        # same for clicks
+    bounced = int(stats.get("bounce", 0))
+    unsubscribed = int(stats.get("unsubscribed", 0))
 
     name = email.get("name", "")
     return EmailRecord(
@@ -147,6 +155,7 @@ def _build_record(email: dict, stats: dict) -> EmailRecord:
         subject=email.get("subject", ""),
         email_type=email.get("type"),
         content_type=_parse_content_type(name),
+        campaign_name=email.get("campaignName") or None,
         send_date=_parse_dt(email.get("publishDate") or email.get("sendDate")),
         campaign_ids=email.get("allEmailCampaignIds", []),
         sent=sent,
@@ -155,9 +164,14 @@ def _build_record(email: dict, stats: dict) -> EmailRecord:
         unique_opens=unique_opens,
         clicks=clicks,
         unique_clicks=unique_clicks,
+        bounced=bounced,
+        unsubscribed=unsubscribed,
         open_rate=_rate(unique_opens, delivered),
         click_rate=_rate(unique_clicks, delivered),
         click_to_open_rate=_rate(unique_clicks, unique_opens),
+        bounce_rate=_rate(bounced, sent),
+        unsubscribe_rate=_rate(unsubscribed, delivered),
+        delivered_rate=_rate(delivered, sent),
     )
 
 
