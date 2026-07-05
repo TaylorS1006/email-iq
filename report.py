@@ -9,6 +9,7 @@ and playbook insights per content type.
 import json
 import os
 import subprocess
+import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Optional
@@ -48,6 +49,10 @@ AI_BENCHMARKS = {
     "unsubscribe_rate": ("Unsubscribe Rate", 0.005, True),
     "bounce_rate":      ("Bounce Rate",      0.0025,True),
 }
+
+# Pipeline Association covers every campaign sent on/after this fixed date —
+# not a rolling window. Bump manually if the program's start date changes.
+PIPELINE_START_DATE = "2026-01-01"
 
 
 def _generate_ai_summary(label: str, metrics: dict, prior: Optional[dict]) -> dict:
@@ -228,6 +233,7 @@ def _render_html(
     ai_summaries: dict[str, dict],
     generated_at: datetime,
     pipeline_data: Optional[dict] = None,
+    pipeline_start_date: str = PIPELINE_START_DATE,
 ) -> str:
     now_str = generated_at.strftime("%B %d, %Y at %I:%M %p UTC")
 
@@ -454,9 +460,6 @@ def _render_html(
   .ai-summary-note {{ font-size: 11px; color: #94a3b8; margin-top: 10px; }}
 
   /* ── Pipeline ── */
-  .pipeline-selector {{ margin-bottom: 24px; }}
-  .pipeline-selector label {{ font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: #64748b; display: block; margin-bottom: 6px; }}
-  .pipeline-selector select {{ background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 9px 14px; font-size: 13px; color: #1a1a2e; cursor: pointer; box-shadow: 0 1px 2px rgba(0,0,0,0.04); min-width: 260px; }}
   .pipeline-meta {{ font-size: 13px; color: #64748b; margin-bottom: 20px; }}
   .pipeline-meta strong {{ color: #1a1a2e; }}
   .pipeline-cards {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 28px; }}
@@ -618,14 +621,31 @@ def _render_html(
 
   <!-- Pipeline -->
   <div id="view-pipeline" class="view">
-    <div class="pipeline-selector">
-      <label>Campaign</label>
-      <select id="pipeline-campaign-picker" onchange="loadPipeline(this.value)">
-        <option value="">— select a campaign —</option>
-      </select>
+    <div class="filters">
+      <div class="filter-group">
+        <label>From</label>
+        <input type="date" id="pipeline-filter-from" onchange="renderPipeline()">
+      </div>
+      <div class="filter-sep">–</div>
+      <div class="filter-group">
+        <label>To</label>
+        <input type="date" id="pipeline-filter-to" onchange="renderPipeline()">
+      </div>
+      <div class="filter-group">
+        <label>Content Type</label>
+        <select id="pipeline-filter-type" onchange="renderPipeline()">
+          <option value="">All types</option>
+        </select>
+      </div>
+      <div class="filter-group">
+        <label>Campaign</label>
+        <select id="pipeline-filter-campaign" onchange="renderPipeline()">
+          <option value="">All campaigns</option>
+        </select>
+      </div>
     </div>
     <div id="pipeline-content">
-      <div class="pipeline-empty">Select a campaign above to see associated pipeline.</div>
+      <div class="pipeline-empty">No pipeline data for the selected filters.</div>
     </div>
   </div><!-- /pipeline -->
 
@@ -664,7 +684,7 @@ def _render_html(
       </div>
       <div class="settings-row">
         <span class="settings-row-label">Pipeline campaigns</span>
-        <span class="settings-row-value">Top 10 by volume</span>
+        <span class="settings-row-value">All since {pipeline_start_date}</span>
       </div>
       <div class="settings-row">
         <span class="settings-row-label">Internal domain filter</span>
@@ -712,29 +732,142 @@ function switchView(name, btn) {{
   btn.classList.add('active');
 }}
 
-// ── Pipeline ────────────────────────────────────────────────────
-const pipelineCampaigns = Object.keys(PIPELINE_DATA).sort();
-pipelineCampaigns.forEach(name => {{
-  const opt = document.createElement('option');
-  opt.value = name;
-  opt.textContent = name;
-  document.getElementById('pipeline-campaign-picker').appendChild(opt);
+// Populate type filter and playbook picker from data
+const typeSet = new Set(ALL_EMAILS.map(e => e.content_type).filter(t => t && t !== 'unknown'));
+const types = [...typeSet].sort();
+types.forEach(t => {{
+  ['filter-type', 'type-picker'].forEach(id => {{
+    const opt = document.createElement('option');
+    opt.value = t.replace(/ /g, '-');
+    opt.textContent = t.replace(/\\b\\w/g, c => c.toUpperCase());
+    document.getElementById(id).appendChild(opt.cloneNode(true));
+  }});
 }});
 
+// Populate campaign filter from campaign_name field
+const campaigns = [...new Set(ALL_EMAILS.map(e => e.campaign_name).filter(Boolean))].sort();
+campaigns.forEach(name => {{
+  const opt = document.createElement('option');
+  opt.value = name;
+  opt.textContent = name.length > 60 ? name.slice(0, 60) + '…' : name;
+  document.getElementById('filter-campaign').appendChild(opt);
+}});
+
+// Set default date range: last 30 days
+function toISO(d) {{ return d.toISOString().split('T')[0]; }}
+const today = new Date();
+const d30 = new Date(today); d30.setDate(today.getDate() - 30);
+document.getElementById('filter-to').value = toISO(today);
+document.getElementById('filter-from').value = toISO(d30);
+
+// ── Pipeline ────────────────────────────────────────────────────
 function fmt$(n) {{
   if (n >= 1e6) return '$' + (n/1e6).toFixed(1) + 'M';
   if (n >= 1e3) return '$' + Math.round(n/1e3) + 'K';
   return '$' + n.toLocaleString();
 }}
 
-function loadPipeline(campaignName) {{
+const pipelineCampaignNames = Object.keys(PIPELINE_DATA).sort();
+pipelineCampaignNames.forEach(name => {{
+  const opt = document.createElement('option');
+  opt.value = name;
+  opt.textContent = name.length > 60 ? name.slice(0, 60) + '…' : name;
+  document.getElementById('pipeline-filter-campaign').appendChild(opt);
+}});
+
+const pipelineTypeSet = new Set(Object.values(PIPELINE_DATA).map(d => d.content_type).filter(Boolean));
+[...pipelineTypeSet].sort().forEach(t => {{
+  const opt = document.createElement('option');
+  opt.value = t.replace(/ /g, '-');
+  opt.textContent = t.replace(/\\b\\w/g, c => c.toUpperCase());
+  document.getElementById('pipeline-filter-type').appendChild(opt);
+}});
+
+// Default range: fixed program start date through today — matches what's baked into PIPELINE_DATA
+document.getElementById('pipeline-filter-from').value = '{pipeline_start_date}';
+document.getElementById('pipeline-filter-to').value = toISO(today);
+
+function selectPipelineCampaigns(from, to, type, campaign) {{
+  return Object.entries(PIPELINE_DATA).filter(([name, d]) => {{
+    if (campaign && name !== campaign) return false;
+    if (from && d.send_date < from) return false;
+    if (to && d.send_date > to) return false;
+    if (type && (d.content_type || '').replace(/ /g, '-') !== type) return false;
+    return true;
+  }});
+}}
+
+// Merge N campaigns into one rollup: dedupe matched contacts by email and
+// opportunities by id so a contact/deal touched by multiple campaigns in the
+// selected range is only counted once.
+function aggregatePipeline(entries) {{
+  const oppById = new Map();
+  const emailSet = new Set();
+  let totalEngaged = 0;
+
+  entries.forEach(([, d]) => {{
+    totalEngaged += d.total_engaged;
+    (d.matched_emails || []).forEach(e => emailSet.add(e));
+    (d.opportunities || []).forEach(o => {{
+      const existing = oppById.get(o.id);
+      if (!existing) {{
+        oppById.set(o.id, {{...o}});
+      }} else {{
+        existing.contact_level = existing.contact_level || o.contact_level;
+        existing.post_send = existing.post_send || o.post_send;
+      }}
+    }});
+  }});
+
+  const opps = [...oppById.values()];
+  const contactOpps = opps.filter(o => o.contact_level);
+  const accountOpps = opps.filter(o => !o.contact_level);
+
+  const rollup = list => {{
+    const open = list.filter(o => !o.is_closed);
+    const won = list.filter(o => o.is_won);
+    const post = list.filter(o => o.post_send && !o.is_closed);
+    return {{
+      open_count: open.length, open_value: open.reduce((s, o) => s + o.amount, 0),
+      won_count: won.length, won_value: won.reduce((s, o) => s + o.amount, 0),
+      post_count: post.length, post_value: post.reduce((s, o) => s + o.amount, 0),
+    }};
+  }};
+
+  const c = rollup(contactOpps);
+  const a = rollup(accountOpps);
+  const topOpps = contactOpps.filter(o => !o.is_closed)
+    .sort((x, y) => y.amount - x.amount).slice(0, 10);
+
+  return {{
+    campaignCount: entries.length,
+    total_engaged: totalEngaged,
+    total_matched: emailSet.size,
+    contact_open_count: c.open_count, contact_open_value: c.open_value,
+    contact_won_count: c.won_count, contact_won_value: c.won_value,
+    contact_post_count: c.post_count, contact_post_value: c.post_value,
+    account_open_count: a.open_count, account_open_value: a.open_value,
+    account_won_count: a.won_count, account_won_value: a.won_value,
+    account_post_count: a.post_count, account_post_value: a.post_value,
+    top_opps: topOpps,
+  }};
+}}
+
+function renderPipeline() {{
+  const from = document.getElementById('pipeline-filter-from').value;
+  const to = document.getElementById('pipeline-filter-to').value;
+  const type = document.getElementById('pipeline-filter-type').value;
+  const campaign = document.getElementById('pipeline-filter-campaign').value;
   const el = document.getElementById('pipeline-content');
-  if (!campaignName || !PIPELINE_DATA[campaignName]) {{
-    el.innerHTML = '<div class="pipeline-empty">Select a campaign above to see associated pipeline.</div>';
+
+  const entries = selectPipelineCampaigns(from, to, type, campaign);
+  if (!entries.length) {{
+    el.innerHTML = '<div class="pipeline-empty">No pipeline data for the selected filters.</div>';
     return;
   }}
-  const d = PIPELINE_DATA[campaignName];
-  const matchPct = Math.round(d.match_rate * 100);
+
+  const d = aggregatePipeline(entries);
+  const matchPct = d.total_engaged ? Math.round(d.total_matched / d.total_engaged * 100) : 0;
 
   const postContact = d.contact_post_count > 0
     ? `<div class="pipeline-card-post">★ ${{d.contact_post_count}} opps (${{fmt$(d.contact_post_value)}}) created post-send</div>` : '';
@@ -742,7 +875,7 @@ function loadPipeline(campaignName) {{
     ? `<div class="pipeline-card-post">★ ${{d.account_post_count}} opps (${{fmt$(d.account_post_value)}}) created post-send</div>` : '';
 
   let oppsRows = '';
-  (d.top_opps || []).forEach(o => {{
+  d.top_opps.forEach(o => {{
     const badge = o.post_send ? '<span class="post-send-badge">POST-SEND</span>' : '';
     oppsRows += `<tr>
       <td>${{o.account}}${{badge}}</td>
@@ -753,10 +886,14 @@ function loadPipeline(campaignName) {{
   }});
   if (!oppsRows) oppsRows = '<tr><td colspan="4" style="color:#94a3b8">No open contact-level opportunities found.</td></tr>';
 
+  const scopeLabel = d.campaignCount === 1
+    ? `Sent ${{entries[0][1].send_date}}`
+    : `${{d.campaignCount}} campaigns in range`;
+
   el.innerHTML = `
     <div class="pipeline-meta">
-      Sent ${{d.send_date}} &nbsp;·&nbsp;
-      <strong>${{d.total_matched}}</strong> of ${{d.total_engaged}} engaged contacts matched in Salesforce (${{matchPct}}%)
+      ${{scopeLabel}} &nbsp;·&nbsp;
+      <strong>${{d.total_matched}}</strong> unique contacts matched in Salesforce (${{d.total_engaged}} total engaged touches, ${{matchPct}}%)
     </div>
     <div class="pipeline-cards">
       <div class="pipeline-card">
@@ -785,43 +922,11 @@ function loadPipeline(campaignName) {{
         <tbody>${{oppsRows}}</tbody>
       </table>
     </div>
-    <p class="pipeline-disclaimer">★ = opportunity created after the email send date — stronger association signal. All figures use Opportunity_Amount__c. Labeled "associated", not attributed.</p>
+    <p class="pipeline-disclaimer">★ = opportunity created after the email send date — stronger association signal. All figures use Opportunity_Amount__c. Labeled "associated", not attributed. Matched contacts and pipeline value are deduplicated across every campaign in the selected range; "total engaged touches" is summed per campaign and is not deduplicated.</p>
   `;
 }}
 
-// Auto-load first pipeline campaign if available
-if (pipelineCampaigns.length > 0) {{
-  document.getElementById('pipeline-campaign-picker').value = pipelineCampaigns[0];
-  loadPipeline(pipelineCampaigns[0]);
-}}
-
-// Populate type filter and playbook picker from data
-const typeSet = new Set(ALL_EMAILS.map(e => e.content_type).filter(t => t && t !== 'unknown'));
-const types = [...typeSet].sort();
-types.forEach(t => {{
-  ['filter-type', 'type-picker'].forEach(id => {{
-    const opt = document.createElement('option');
-    opt.value = t.replace(/ /g, '-');
-    opt.textContent = t.replace(/\\b\\w/g, c => c.toUpperCase());
-    document.getElementById(id).appendChild(opt.cloneNode(true));
-  }});
-}});
-
-// Populate campaign filter from campaign_name field
-const campaigns = [...new Set(ALL_EMAILS.map(e => e.campaign_name).filter(Boolean))].sort();
-campaigns.forEach(name => {{
-  const opt = document.createElement('option');
-  opt.value = name;
-  opt.textContent = name.length > 60 ? name.slice(0, 60) + '…' : name;
-  document.getElementById('filter-campaign').appendChild(opt);
-}});
-
-// Set default date range: last 30 days
-function toISO(d) {{ return d.toISOString().split('T')[0]; }}
-const today = new Date();
-const d30 = new Date(today); d30.setDate(today.getDate() - 30);
-document.getElementById('filter-to').value = toISO(today);
-document.getElementById('filter-from').value = toISO(d30);
+renderPipeline();
 
 function pct(v) {{ return (v * 100).toFixed(1) + '%'; }}
 
@@ -1060,34 +1165,56 @@ def generate_report(
     PIPELINE_AVAILABLE = _PIPELINE_IMPORT_OK and bool(os.environ.get("SF_USERNAME"))
     if PIPELINE_AVAILABLE:
         print("\nGenerating pipeline association data…")
+        pipeline_cutoff = datetime.strptime(PIPELINE_START_DATE, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+
+        # Every campaign sent on/after PIPELINE_START_DATE qualifies — fixed
+        # cutoff, not a rolling window. all_730 (2yr lookback) comfortably
+        # covers it as long as the cutoff is less than 2 years in the past.
         campaign_id_map: dict[str, list[str]] = defaultdict(list)
-        for e in current:
-            if e.campaign_name and e.campaign_ids:
-                for cid in e.campaign_ids:
-                    if cid not in campaign_id_map[e.campaign_name]:
-                        campaign_id_map[e.campaign_name].append(cid)
+        campaign_content_type: dict[str, str] = {}
+        for e in all_730:
+            if not (e.campaign_name and e.campaign_ids and e.send_date):
+                continue
+            if e.send_date < pipeline_cutoff:
+                continue
+            for cid in e.campaign_ids:
+                if cid not in campaign_id_map[e.campaign_name]:
+                    campaign_id_map[e.campaign_name].append(cid)
+            if e.content_type and e.campaign_name not in campaign_content_type:
+                campaign_content_type[e.campaign_name] = e.content_type
 
-        # Top 10 campaigns by email count
-        top_campaigns = sorted(
-            [(name, ids) for name, ids in campaign_id_map.items()],
-            key=lambda x: -len([e for e in current if e.campaign_name == x[0]]),
-        )[:10]
+        qualifying_campaigns = sorted(campaign_id_map.items())
+        print(f"  {len(qualifying_campaigns)} campaigns sent on/after {PIPELINE_START_DATE} qualify")
 
-        for campaign_name, campaign_ids in top_campaigns:
+        pipeline_start_time = time.monotonic()
+        for campaign_name, campaign_ids in qualifying_campaigns:
             print(f"  [{campaign_name}]…")
             try:
                 # Use the first (most recent) campaign ID for this campaign
                 result = analyze_campaign_pipeline(campaign_ids[0], hs_token=token)
-                pipeline_data[campaign_name] = result.to_dict()
+                data = result.to_dict()
+                data["content_type"] = campaign_content_type.get(campaign_name)
+                pipeline_data[campaign_name] = data
                 print(f"    ✓ {result.total_matched} contacts matched")
             except Exception as e:
                 print(f"    ✗ {e}")
+        pipeline_elapsed = time.monotonic() - pipeline_start_time
+
+        n = len(qualifying_campaigns)
+        avg = pipeline_elapsed / n if n else 0
+        print(
+            f"\nPipeline association: {len(pipeline_data)}/{n} campaigns succeeded "
+            f"in {pipeline_elapsed:.1f}s ({avg:.1f}s/campaign avg)"
+        )
     else:
         print("\nSkipping pipeline (SF credentials not configured).")
 
     rows = _build_summary_rows(current_groups, prior_groups)
     generated_at = datetime.now(tz=timezone.utc)
-    html = _render_html(all_730, rows, playbook, current_groups, prior_groups, ai_summaries, generated_at, pipeline_data)
+    html = _render_html(
+        all_730, rows, playbook, current_groups, prior_groups, ai_summaries, generated_at,
+        pipeline_data, PIPELINE_START_DATE,
+    )
 
     output_path = os.path.join(os.path.dirname(__file__), "index.html")
     with open(output_path, "w") as f:

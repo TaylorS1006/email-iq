@@ -71,6 +71,7 @@ class PipelineResult:
 
     account_opps: list[Opportunity] = field(default_factory=list)
     contact_opps: list[Opportunity] = field(default_factory=list)
+    matched_contacts: list[SFContact] = field(default_factory=list)
 
     @property
     def all_opps(self) -> list[Opportunity]:
@@ -104,6 +105,25 @@ class PipelineResult:
             "total_engaged": self.total_engaged,
             "total_matched": self.total_matched,
             "match_rate": round(self.match_rate, 4),
+            # Matched contact emails and the full opportunity list (deduped within
+            # this campaign via all_opps) are included so the dashboard can merge
+            # multiple campaigns without double-counting a shared contact or deal.
+            "matched_emails": sorted({c.email for c in self.matched_contacts}),
+            "opportunities": [
+                {
+                    "id": o.opp_id,
+                    "account": o.account_name,
+                    "account_id": o.account_id,
+                    "name": o.name,
+                    "stage": o.stage,
+                    "amount": o.amount,
+                    "is_closed": o.is_closed,
+                    "is_won": o.is_won,
+                    "post_send": o.created_post_send,
+                    "contact_level": o.contact_level,
+                }
+                for o in self.all_opps
+            ],
             "contact_open_count": len(co_open),
             "contact_open_value": sum(o.amount for o in co_open),
             "contact_won_count": len(co_won),
@@ -329,6 +349,7 @@ def analyze_campaign_pipeline(
         match_rate=match_rate,
         account_opps=account_opps,
         contact_opps=contact_opps,
+        matched_contacts=contacts,
     )
 
 
