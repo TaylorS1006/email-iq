@@ -1,29 +1,30 @@
 """
 SendSmart Pipeline Association.
 
-For a given HubSpot email campaign, finds engaged contacts (opens + clicks),
-matches them to Salesforce, and rolls up associated pipeline and revenue.
+For a given HubSpot email campaign, finds contacts who CLICKED (opens no
+longer qualify as engagement anywhere in this module), matches them to
+Salesforce, and rolls up associated pipeline and revenue — both account-level
+(any open opp at an account with a clicked contact) and contact-level (that
+specific person is on the deal).
 
 Contact-level opportunities are further sorted into signal tiers, aligned to
 Medallion's existing 60-day attribution window:
-  - "directly_followed"        — contact clicked, the opportunity was created
-                                  within 60 days after that click, AND a rep
+  - "directly_followed"        — the opportunity was created within 60 days
+                                  after the contact's click, AND a rep
                                   Task/Event ties the contact or account to
                                   that window (corroborated).
-  - "followed_uncorroborated"  — same click + 60-day match, but no rep
-                                  Task/Event found in that window.
-  - "no_signal"                — contact-level opp tied to an engaged contact,
-                                  but the contact never clicked (open-only) or
-                                  the opp falls outside the 60-day window.
+  - "followed_uncorroborated"  — same 60-day match, but no rep Task/Event
+                                  found in that window.
+  - "no_signal"                — the opp falls outside the 60-day window.
 Account-level opportunities are untouched by this tiering — they remain
-"any open opp at a matched account," independent of click/window/rep signal.
+"any open opp at a matched account," independent of window/rep signal.
 
 These are association signals, not causal attribution — no tier implies the
 email "caused" or should be credited with the deal.
 
 Uses:
-  - HubSpot Email Events API v1 for engaged contacts (opens + clicks) and,
-    where available, per-event click timestamps
+  - HubSpot Email Events API v1 for clicked contacts and, where available,
+    per-event click timestamps
   - Salesforce simple_salesforce for Contact, Opportunity, Task, and Event
     queries
 
@@ -108,7 +109,7 @@ class PipelineResult:
     campaign_subject: str
     send_date: str
 
-    total_engaged: int         # excluding internal
+    total_engaged: int         # clicked contacts, excluding internal (opens no longer count)
     total_matched: int
     match_rate: float
 
@@ -212,23 +213,21 @@ def _parse_event_dt(value) -> Optional[datetime]:
 
 @dataclass
 class EngagementDetail:
-    engaged_emails: set[str]         # opened OR clicked, excluding internal — unchanged semantics
-    clicked_emails: set[str]         # subset of engaged_emails that clicked at least once
+    clicked_emails: set[str]          # engagement = clicked, excluding internal — opens no longer count
     click_dates: dict[str, datetime]  # email -> earliest CLICK event datetime (UTC), only where HubSpot gave a parseable timestamp
     subject: str
-    send_date: str                   # YYYY-MM-DD
+    send_date: str                    # YYYY-MM-DD
 
 
-def _get_engaged_emails(campaign_id: str, hs_token: str) -> EngagementDetail:
+def _get_clicked_emails(campaign_id: str, hs_token: str) -> EngagementDetail:
     """
-    Fetches engagement for one campaign. `engaged_emails` (open ∪ click) keeps
-    its original purpose — matching to Salesforce and reporting total reach.
-    `clicked_emails` + `click_dates` isolate the click-only signal used for
-    the 60-day tiering: click_dates holds the earliest click timestamp per
-    contact where HubSpot's event payload included a parseable 'created'
-    field; contacts who clicked but lack a usable timestamp are still in
-    clicked_emails, and callers fall back to the campaign send date for them.
-    Excludes internal @medallion.co addresses throughout.
+    Fetches CLICK-only engagement for one campaign (opens are not fetched —
+    they no longer factor into Pipeline Association at all). click_dates
+    holds the earliest click timestamp per contact where HubSpot's event
+    payload included a parseable 'created' field; contacts who clicked but
+    lack a usable timestamp are still in clicked_emails, and callers fall
+    back to the campaign send date for them. Excludes internal
+    @medallion.co addresses throughout.
     """
     headers = {"Authorization": f"Bearer {hs_token}"}
     base = "https://api.hubapi.com"
@@ -253,34 +252,30 @@ def _get_engaged_emails(campaign_id: str, hs_token: str) -> EngagementDetail:
             break
         after = body["paging"]["next"]["after"]
 
-    # Get engaged contacts
-    engaged: set = set()
+    # Get clicked contacts
     clicked: set = set()
     click_dates: dict = {}
-    for event_type in ["OPEN", "CLICK"]:
-        offset = None
-        while True:
-            params = {"campaignId": campaign_id, "eventType": event_type, "limit": 1000}
-            if offset:
-                params["offset"] = offset
-            r = requests.get(f"{base}/email/public/v1/events", headers=headers, params=params)
-            r.raise_for_status()
-            data = r.json()
-            for ev in data.get("events", []):
-                email = ev.get("recipient", "").lower()
-                if not email or email.endswith(f"@{INTERNAL_DOMAIN}"):
-                    continue
-                engaged.add(email)
-                if event_type == "CLICK":
-                    clicked.add(email)
-                    ts = _parse_event_dt(ev.get("created"))
-                    if ts and (email not in click_dates or ts < click_dates[email]):
-                        click_dates[email] = ts
-            if not data.get("hasMore"):
-                break
-            offset = data.get("offset")
+    offset = None
+    while True:
+        params = {"campaignId": campaign_id, "eventType": "CLICK", "limit": 1000}
+        if offset:
+            params["offset"] = offset
+        r = requests.get(f"{base}/email/public/v1/events", headers=headers, params=params)
+        r.raise_for_status()
+        data = r.json()
+        for ev in data.get("events", []):
+            email = ev.get("recipient", "").lower()
+            if not email or email.endswith(f"@{INTERNAL_DOMAIN}"):
+                continue
+            clicked.add(email)
+            ts = _parse_event_dt(ev.get("created"))
+            if ts and (email not in click_dates or ts < click_dates[email]):
+                click_dates[email] = ts
+        if not data.get("hasMore"):
+            break
+        offset = data.get("offset")
 
-    return EngagementDetail(engaged, clicked, click_dates, subject, send_date)
+    return EngagementDetail(clicked, click_dates, subject, send_date)
 
 
 # ─── Salesforce ──────────────────────────────────────────────────────────────
@@ -440,17 +435,17 @@ def _apply_signal_tiers(
     Mutates contact_opps in place, assigning signal_tier / corroborated /
     click_date_used / click_date_source.
 
-    PRIMARY SIGNAL is click-only (opens don't qualify). An opp is a
-    candidate "followed" tier when its contact clicked and the opp's
-    CreatedDate falls within [click_date, click_date + SIGNAL_WINDOW_DAYS].
-    Per-contact click timestamps come from HubSpot event data where
-    available; falls back to the campaign send date otherwise. Candidates
-    are then corroborated against rep Task/Event activity tied to the
-    contact or account within that same window (+ a small grace period
-    after the opp's creation, since reps often log the touch just after
-    creating the record). Everything else — open-only contacts, or opps
-    outside the 60-day window — lands in "no_signal": still shown, just
-    labeled as a weaker/no signal, never hidden.
+    Every contact here already clicked — matching upstream (analyze_campaign_
+    pipeline) is click-only, so there's no "opened but didn't click" case to
+    filter out. An opp is a candidate "followed" tier when its CreatedDate
+    falls within [click_date, click_date + SIGNAL_WINDOW_DAYS]. Per-contact
+    click timestamps come from HubSpot event data where available; falls
+    back to the campaign send date otherwise. Candidates are then
+    corroborated against rep Task/Event activity tied to the contact or
+    account within that same window (+ a small grace period after the opp's
+    creation, since reps often log the touch just after creating the
+    record). Opps outside the 60-day window land in "no_signal": still
+    shown, just labeled as a weaker/no signal, never hidden.
     """
     email_by_contact_id = {c.contact_id: c.email for c in contacts}
     fallback_send_dt: Optional[datetime] = None
@@ -462,7 +457,7 @@ def _apply_signal_tiers(
     candidates: list[Opportunity] = []
     for o in contact_opps:
         email = email_by_contact_id.get(o.contact_id)
-        if not email or email not in engagement.clicked_emails:
+        if not email:
             o.signal_tier = "no_signal"
             continue
 
@@ -525,10 +520,10 @@ def analyze_campaign_pipeline(
 ) -> PipelineResult:
     hs_token = hs_token or os.environ["HUBSPOT_ACCESS_TOKEN"]
 
-    print(f"Fetching engaged contacts for campaign {campaign_id}…")
-    engagement = _get_engaged_emails(campaign_id, hs_token)
-    emails, subject, send_date = engagement.engaged_emails, engagement.subject, engagement.send_date
-    print(f"  {len(emails)} external engaged contacts ({len(engagement.clicked_emails)} clicked) | send date: {send_date}")
+    print(f"Fetching clicked contacts for campaign {campaign_id}…")
+    engagement = _get_clicked_emails(campaign_id, hs_token)
+    emails, subject, send_date = engagement.clicked_emails, engagement.subject, engagement.send_date
+    print(f"  {len(emails)} external clicked contacts | send date: {send_date}")
 
     print("Matching to Salesforce contacts…")
     sf = _sf_connect()

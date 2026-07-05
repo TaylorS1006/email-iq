@@ -923,7 +923,7 @@ function renderPipeline() {{
   el.innerHTML = `
     <div class="pipeline-meta">
       ${{scopeLabel}} &nbsp;·&nbsp;
-      <strong>${{d.total_matched}}</strong> unique contacts matched in Salesforce (${{d.total_engaged}} total engaged touches, ${{matchPct}}%)
+      <strong>${{d.total_matched}}</strong> unique contacts matched in Salesforce (${{d.total_engaged}} total click touches, ${{matchPct}}%)
     </div>
     <div class="pipeline-meta">${{tierLine}}</div>
     <div class="pipeline-cards">
@@ -954,13 +954,14 @@ function renderPipeline() {{
       </table>
     </div>
     <p class="pipeline-disclaimer">
+      Engagement here means clicked — opens no longer count anywhere in Pipeline Association, including which contacts/accounts pull in opportunities at all.
       ★ POST-SEND = opportunity created any time after the email send date (no day limit).
       Signal tiers apply to contact-level opportunities only, aligned to Medallion's 60-day attribution window:
-      <strong>Directly followed</strong> = contact clicked and the opp was created within 60 days after that click, with a rep Task/Event tying the contact or account to that window;
-      <strong>Followed, uncorroborated</strong> = same click + 60-day match, no rep activity found;
-      <strong>No qualifying signal</strong> = contact only opened (never clicked), or the opp falls outside the 60-day window — still shown, never hidden.
+      <strong>Directly followed</strong> = the opp was created within 60 days after the contact's click, with a rep Task/Event tying the contact or account to that window;
+      <strong>Followed, uncorroborated</strong> = same 60-day match, no rep activity found;
+      <strong>No qualifying signal</strong> = the opp falls outside the 60-day window — still shown, never hidden.
       Account-level opportunities are not tiered. These are association signals, not causal attribution — no tier means the email "caused" or should be credited with the deal.
-      All figures use Opportunity_Amount__c. Matched contacts and pipeline value are deduplicated across every campaign in the selected range; "total engaged touches" is summed per campaign and is not deduplicated.
+      All figures use Opportunity_Amount__c. Matched contacts and pipeline value are deduplicated across every campaign in the selected range; "total click touches" is summed per campaign and is not deduplicated.
     </p>
   `;
 }}
