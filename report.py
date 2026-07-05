@@ -268,8 +268,8 @@ def _render_html(
                 <tr>
                     <td>{e.subject}</td>
                     <td>{e.sent:,}</td>
-                    <td class="{_delta_class(e.open_rate, BENCHMARKS['open_rate'])}">{_pct(e.open_rate)}</td>
-                    <td class="{_delta_class(e.click_rate, BENCHMARKS['click_rate'])}">{_pct(e.click_rate)}</td>
+                    <td><span class="pct-pill {_delta_class(e.open_rate, BENCHMARKS['open_rate'])}">{_pct(e.open_rate)}</span></td>
+                    <td><span class="pct-pill {_delta_class(e.click_rate, BENCHMARKS['click_rate'])}">{_pct(e.click_rate)}</span></td>
                 </tr>"""
         if not top_emails_html:
             top_emails_html = '<tr><td colspan="4">No emails with 50+ recipients</td></tr>'
@@ -333,12 +333,18 @@ def _render_html(
     --color-bg: #E9E6DF;
     --color-border: #A29A90;
     --color-text: #0E0E0F;
-    --color-sidebar: #52451B;
+    --color-text-secondary: #5A5548;
+    --color-sidebar: #433F2A;
+    --color-sidebar-muted: rgba(233, 230, 223, 0.72);
     --color-primary-hover: #754F4D;
     --color-accent: #9B756E;
     --color-good: #7B745B;
     --color-caution: #947B50;
     --color-avoid: #433F2A;
+    --color-positive: #4B6B35;
+    --color-good-bg: rgba(123, 116, 91, 0.18);
+    --color-bad-bg: rgba(148, 123, 80, 0.22);
+    --color-neutral-bg: rgba(162, 154, 144, 0.20);
     /* Metric cards — one solid color each, reused wherever a card-specific accent is needed */
     --color-card-1: #BDA49B;  /* Delivered rate */
     --color-card-2: #754F4D;  /* Open rate */
@@ -368,7 +374,7 @@ def _render_html(
     border-bottom: 1px solid var(--color-primary-hover);
   }}
   .sidebar-logo h1 {{ font-size: 17px; font-weight: 700; color: var(--color-bg); letter-spacing: -0.02em; }}
-  .sidebar-logo p {{ font-size: 11px; color: var(--color-border); margin-top: 3px; }}
+  .sidebar-logo p {{ font-size: 11px; color: var(--color-sidebar-muted); margin-top: 3px; }}
   .sidebar-nav {{ flex: 1; padding: 12px 12px; display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }}
   .nav-item {{
     display: block;
@@ -391,7 +397,7 @@ def _render_html(
   .sidebar-footer {{
     padding: 16px 24px;
     font-size: 11px;
-    color: var(--color-border);
+    color: var(--color-sidebar-muted);
     border-top: 1px solid var(--color-primary-hover);
   }}
 
@@ -417,7 +423,7 @@ def _render_html(
     box-shadow: 0 1px 2px rgba(0,0,0,0.04); min-width: 160px;
   }}
   .filters select:focus, .filters input[type=date]:focus {{ outline: none; border-color: var(--color-accent); }}
-  .filter-sep {{ color: var(--color-border); font-size: 18px; align-self: flex-end; padding-bottom: 8px; }}
+  .filter-sep {{ color: var(--color-text-secondary); font-size: 18px; align-self: flex-end; padding-bottom: 8px; }}
 
   /* ── Metric cards ── */
   .metric-bar {{ display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; margin-bottom: 28px; }}
@@ -450,20 +456,21 @@ def _render_html(
   th {{ padding: 11px 16px; text-align: left; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--color-primary-hover); }}
   td {{ padding: 12px 16px; border-bottom: 1px solid var(--color-border); }}
   tr:last-child td {{ border-bottom: none; }}
-  .benchmark-row td {{ font-size: 12px; color: var(--color-border); font-style: italic; background: var(--color-bg); }}
+  .benchmark-row td {{ font-size: 12px; color: var(--color-text-secondary); font-style: italic; background: var(--color-bg); }}
   .data-row {{ cursor: pointer; transition: background 0.1s; }}
   .data-row:hover {{ background: var(--color-bg); }}
   .data-row.active {{ background: var(--color-bg); }}
   .data-row.active .type-cell {{ color: var(--color-accent); font-weight: 600; }}
   .type-cell {{ text-transform: capitalize; font-weight: 500; }}
-  td.good {{ color: var(--color-good); font-weight: 600; }}
-  td.ok {{ color: var(--color-caution); font-weight: 600; }}
-  td.bad {{ color: var(--color-avoid); font-weight: 600; }}
+  .pct-pill {{ color: var(--color-text); font-weight: 600; }}
+  .pct-pill.good {{ background: var(--color-good-bg); padding: 3px 10px; border-radius: 99px; }}
+  .pct-pill.bad {{ background: var(--color-bad-bg); padding: 3px 10px; border-radius: 99px; }}
+  .pct-pill.ok {{ font-weight: 500; }}
 
   /* ── Playbook ── */
   .playbook-header {{ display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }}
   .playbook-header h2 {{ font-size: 17px; font-weight: 600; text-transform: capitalize; color: var(--color-text); }}
-  .playbook-header .sample-count {{ font-size: 13px; color: var(--color-border); font-weight: 400; margin-left: 8px; }}
+  .playbook-header .sample-count {{ font-size: 13px; color: var(--color-text-secondary); font-weight: 400; margin-left: 8px; }}
   .select-styled {{
     appearance: none;
     background: white url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23A29A90' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 12px center;
@@ -487,32 +494,32 @@ def _render_html(
   .ai-summary-recs {{ list-style: none; padding: 0; display: flex; flex-direction: column; gap: 6px; }}
   .ai-summary-recs li {{ font-size: 13px; color: var(--color-text); padding-left: 18px; position: relative; line-height: 1.5; }}
   .ai-summary-recs li::before {{ content: "→"; position: absolute; left: 0; color: var(--color-accent); font-weight: 700; }}
-  .ai-summary-note {{ font-size: 11px; color: var(--color-border); margin-top: 10px; }}
+  .ai-summary-note {{ font-size: 11px; color: var(--color-text-secondary); margin-top: 10px; }}
 
   /* ── Pipeline ── */
-  .pipeline-meta {{ font-size: 13px; color: var(--color-border); margin-bottom: 20px; }}
+  .pipeline-meta {{ font-size: 13px; color: var(--color-text-secondary); margin-bottom: 20px; }}
   .pipeline-meta strong {{ color: var(--color-text); }}
   .pipeline-cards {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 28px; }}
   .pipeline-card {{ background: white; border: 1px solid var(--color-border); border-radius: 14px; padding: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.07); }}
   .pipeline-card-label {{ font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em; color: var(--color-primary-hover); margin-bottom: 8px; }}
   .pipeline-card-value {{ font-size: 26px; font-weight: 800; color: var(--color-text); line-height: 1; margin-bottom: 4px; }}
-  .pipeline-card-sub {{ font-size: 12px; color: var(--color-border); }}
-  .pipeline-card-post {{ font-size: 12px; color: var(--color-good); font-weight: 600; margin-top: 6px; }}
+  .pipeline-card-sub {{ font-size: 12px; color: var(--color-text-secondary); }}
+  .pipeline-card-post {{ font-size: 12px; color: var(--color-positive); font-weight: 600; margin-top: 6px; }}
   .pipeline-section-title {{ font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--color-primary-hover); margin-bottom: 12px; }}
   .pipeline-table-wrap {{ background: white; border: 1px solid var(--color-border); border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.07); overflow-x: auto; -webkit-overflow-scrolling: touch; margin-bottom: 24px; }}
   .pipeline-table-wrap table {{ min-width: 900px; }}
-  .post-send-badge {{ display: inline-block; background: var(--color-bg); color: var(--color-good); font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 99px; letter-spacing: 0.04em; margin-left: 6px; vertical-align: middle; }}
-  .pipeline-tier-chip {{ display: inline-block; font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 99px; margin-right: 6px; }}
-  .tier-directly {{ background: var(--color-bg); color: var(--color-good); }}
-  .tier-none {{ background: var(--color-bg); color: var(--color-border); }}
-  .pipeline-tier-timing {{ font-size: 10px; color: var(--color-border); margin-top: 4px; white-space: nowrap; }}
-  .pipeline-disclaimer {{ font-size: 12px; color: var(--color-border); margin-top: 8px; font-style: italic; }}
-  .pipeline-empty {{ color: var(--color-border); font-size: 15px; padding: 60px; text-align: center; background: white; border-radius: 12px; }}
+  .post-send-badge {{ display: inline-block; background: var(--color-bg); color: var(--color-positive); font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 99px; letter-spacing: 0.04em; margin-left: 6px; vertical-align: middle; }}
+  .pipeline-tier-chip {{ display: inline-block; font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 99px; margin-right: 6px; color: var(--color-text); }}
+  .tier-directly {{ background: var(--color-good-bg); }}
+  .tier-none {{ background: var(--color-neutral-bg); }}
+  .pipeline-tier-timing {{ font-size: 10px; color: var(--color-text-secondary); margin-top: 4px; white-space: nowrap; }}
+  .pipeline-disclaimer {{ font-size: 12px; color: var(--color-text-secondary); margin-top: 8px; font-style: italic; }}
+  .pipeline-empty {{ color: var(--color-text-secondary); font-size: 15px; padding: 60px; text-align: center; background: white; border-radius: 12px; }}
 
   /* ── Placeholder views ── */
   .placeholder-card {{ background: white; border-radius: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.07); padding: 64px 40px; text-align: center; max-width: 480px; margin: 60px auto 0; }}
   .placeholder-card h2 {{ font-size: 20px; font-weight: 700; color: var(--color-text); margin-bottom: 10px; }}
-  .placeholder-card p {{ font-size: 14px; color: var(--color-border); line-height: 1.6; }}
+  .placeholder-card p {{ font-size: 14px; color: var(--color-text-secondary); line-height: 1.6; }}
   .placeholder-badge {{ display: inline-block; background: var(--color-bg); color: var(--color-accent); font-size: 11px; font-weight: 700; letter-spacing: 0.07em; padding: 4px 12px; border-radius: 99px; margin-bottom: 20px; text-transform: uppercase; }}
 
   /* ── Settings ── */
@@ -521,7 +528,7 @@ def _render_html(
   .settings-row {{ display: flex; align-items: center; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--color-border); }}
   .settings-row:last-child {{ border-bottom: none; }}
   .settings-row-label {{ font-size: 13px; color: var(--color-text); font-weight: 500; }}
-  .settings-row-value {{ font-size: 13px; color: var(--color-border); }}
+  .settings-row-value {{ font-size: 13px; color: var(--color-text-secondary); }}
   .status-dot {{ display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }}
   .status-dot.green {{ background: var(--color-good); }}
   .status-dot.red {{ background: var(--color-avoid); }}
@@ -1146,9 +1153,9 @@ function applyFilters() {{
         <td class="type-cell">${{ct}}</td>
         <td>${{a.count}}</td>
         <td>${{a.sent.toLocaleString()}}</td>
-        <td class="${{orCls}}">${{pct(a.open_rate)}}</td>
-        <td class="${{crCls}}">${{pct(a.click_rate)}}</td>
-        <td class="${{ctCls}}">${{pct(a.ctor)}}</td>
+        <td><span class="pct-pill ${{orCls}}">${{pct(a.open_rate)}}</span></td>
+        <td><span class="pct-pill ${{crCls}}">${{pct(a.click_rate)}}</span></td>
+        <td><span class="pct-pill ${{ctCls}}">${{pct(a.ctor)}}</span></td>
       </tr>`;
     }});
   tbody.innerHTML += `<tr class="benchmark-row"><td colspan="3">B2B SaaS benchmark</td><td>35%</td><td>3%</td><td>10%</td></tr>`;

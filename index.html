@@ -9,12 +9,18 @@
     --color-bg: #E9E6DF;
     --color-border: #A29A90;
     --color-text: #0E0E0F;
-    --color-sidebar: #52451B;
+    --color-text-secondary: #5A5548;
+    --color-sidebar: #433F2A;
+    --color-sidebar-muted: rgba(233, 230, 223, 0.72);
     --color-primary-hover: #754F4D;
     --color-accent: #9B756E;
     --color-good: #7B745B;
     --color-caution: #947B50;
     --color-avoid: #433F2A;
+    --color-positive: #4B6B35;
+    --color-good-bg: rgba(123, 116, 91, 0.18);
+    --color-bad-bg: rgba(148, 123, 80, 0.22);
+    --color-neutral-bg: rgba(162, 154, 144, 0.20);
     /* Metric cards — one solid color each, reused wherever a card-specific accent is needed */
     --color-card-1: #BDA49B;  /* Delivered rate */
     --color-card-2: #754F4D;  /* Open rate */
@@ -44,7 +50,7 @@
     border-bottom: 1px solid var(--color-primary-hover);
   }
   .sidebar-logo h1 { font-size: 17px; font-weight: 700; color: var(--color-bg); letter-spacing: -0.02em; }
-  .sidebar-logo p { font-size: 11px; color: var(--color-border); margin-top: 3px; }
+  .sidebar-logo p { font-size: 11px; color: var(--color-sidebar-muted); margin-top: 3px; }
   .sidebar-nav { flex: 1; padding: 12px 12px; display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
   .nav-item {
     display: block;
@@ -67,7 +73,7 @@
   .sidebar-footer {
     padding: 16px 24px;
     font-size: 11px;
-    color: var(--color-border);
+    color: var(--color-sidebar-muted);
     border-top: 1px solid var(--color-primary-hover);
   }
 
@@ -93,7 +99,7 @@
     box-shadow: 0 1px 2px rgba(0,0,0,0.04); min-width: 160px;
   }
   .filters select:focus, .filters input[type=date]:focus { outline: none; border-color: var(--color-accent); }
-  .filter-sep { color: var(--color-border); font-size: 18px; align-self: flex-end; padding-bottom: 8px; }
+  .filter-sep { color: var(--color-text-secondary); font-size: 18px; align-self: flex-end; padding-bottom: 8px; }
 
   /* ── Metric cards ── */
   .metric-bar { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; margin-bottom: 28px; }
@@ -126,20 +132,21 @@
   th { padding: 11px 16px; text-align: left; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--color-primary-hover); }
   td { padding: 12px 16px; border-bottom: 1px solid var(--color-border); }
   tr:last-child td { border-bottom: none; }
-  .benchmark-row td { font-size: 12px; color: var(--color-border); font-style: italic; background: var(--color-bg); }
+  .benchmark-row td { font-size: 12px; color: var(--color-text-secondary); font-style: italic; background: var(--color-bg); }
   .data-row { cursor: pointer; transition: background 0.1s; }
   .data-row:hover { background: var(--color-bg); }
   .data-row.active { background: var(--color-bg); }
   .data-row.active .type-cell { color: var(--color-accent); font-weight: 600; }
   .type-cell { text-transform: capitalize; font-weight: 500; }
-  td.good { color: var(--color-good); font-weight: 600; }
-  td.ok { color: var(--color-caution); font-weight: 600; }
-  td.bad { color: var(--color-avoid); font-weight: 600; }
+  .pct-pill { color: var(--color-text); font-weight: 600; }
+  .pct-pill.good { background: var(--color-good-bg); padding: 3px 10px; border-radius: 99px; }
+  .pct-pill.bad { background: var(--color-bad-bg); padding: 3px 10px; border-radius: 99px; }
+  .pct-pill.ok { font-weight: 500; }
 
   /* ── Playbook ── */
   .playbook-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
   .playbook-header h2 { font-size: 17px; font-weight: 600; text-transform: capitalize; color: var(--color-text); }
-  .playbook-header .sample-count { font-size: 13px; color: var(--color-border); font-weight: 400; margin-left: 8px; }
+  .playbook-header .sample-count { font-size: 13px; color: var(--color-text-secondary); font-weight: 400; margin-left: 8px; }
   .select-styled {
     appearance: none;
     background: white url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23A29A90' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 12px center;
@@ -163,32 +170,32 @@
   .ai-summary-recs { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 6px; }
   .ai-summary-recs li { font-size: 13px; color: var(--color-text); padding-left: 18px; position: relative; line-height: 1.5; }
   .ai-summary-recs li::before { content: "→"; position: absolute; left: 0; color: var(--color-accent); font-weight: 700; }
-  .ai-summary-note { font-size: 11px; color: var(--color-border); margin-top: 10px; }
+  .ai-summary-note { font-size: 11px; color: var(--color-text-secondary); margin-top: 10px; }
 
   /* ── Pipeline ── */
-  .pipeline-meta { font-size: 13px; color: var(--color-border); margin-bottom: 20px; }
+  .pipeline-meta { font-size: 13px; color: var(--color-text-secondary); margin-bottom: 20px; }
   .pipeline-meta strong { color: var(--color-text); }
   .pipeline-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 28px; }
   .pipeline-card { background: white; border: 1px solid var(--color-border); border-radius: 14px; padding: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.07); }
   .pipeline-card-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em; color: var(--color-primary-hover); margin-bottom: 8px; }
   .pipeline-card-value { font-size: 26px; font-weight: 800; color: var(--color-text); line-height: 1; margin-bottom: 4px; }
-  .pipeline-card-sub { font-size: 12px; color: var(--color-border); }
-  .pipeline-card-post { font-size: 12px; color: var(--color-good); font-weight: 600; margin-top: 6px; }
+  .pipeline-card-sub { font-size: 12px; color: var(--color-text-secondary); }
+  .pipeline-card-post { font-size: 12px; color: var(--color-positive); font-weight: 600; margin-top: 6px; }
   .pipeline-section-title { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--color-primary-hover); margin-bottom: 12px; }
   .pipeline-table-wrap { background: white; border: 1px solid var(--color-border); border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.07); overflow-x: auto; -webkit-overflow-scrolling: touch; margin-bottom: 24px; }
   .pipeline-table-wrap table { min-width: 900px; }
-  .post-send-badge { display: inline-block; background: var(--color-bg); color: var(--color-good); font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 99px; letter-spacing: 0.04em; margin-left: 6px; vertical-align: middle; }
-  .pipeline-tier-chip { display: inline-block; font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 99px; margin-right: 6px; }
-  .tier-directly { background: var(--color-bg); color: var(--color-good); }
-  .tier-none { background: var(--color-bg); color: var(--color-border); }
-  .pipeline-tier-timing { font-size: 10px; color: var(--color-border); margin-top: 4px; white-space: nowrap; }
-  .pipeline-disclaimer { font-size: 12px; color: var(--color-border); margin-top: 8px; font-style: italic; }
-  .pipeline-empty { color: var(--color-border); font-size: 15px; padding: 60px; text-align: center; background: white; border-radius: 12px; }
+  .post-send-badge { display: inline-block; background: var(--color-bg); color: var(--color-positive); font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 99px; letter-spacing: 0.04em; margin-left: 6px; vertical-align: middle; }
+  .pipeline-tier-chip { display: inline-block; font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 99px; margin-right: 6px; color: var(--color-text); }
+  .tier-directly { background: var(--color-good-bg); }
+  .tier-none { background: var(--color-neutral-bg); }
+  .pipeline-tier-timing { font-size: 10px; color: var(--color-text-secondary); margin-top: 4px; white-space: nowrap; }
+  .pipeline-disclaimer { font-size: 12px; color: var(--color-text-secondary); margin-top: 8px; font-style: italic; }
+  .pipeline-empty { color: var(--color-text-secondary); font-size: 15px; padding: 60px; text-align: center; background: white; border-radius: 12px; }
 
   /* ── Placeholder views ── */
   .placeholder-card { background: white; border-radius: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.07); padding: 64px 40px; text-align: center; max-width: 480px; margin: 60px auto 0; }
   .placeholder-card h2 { font-size: 20px; font-weight: 700; color: var(--color-text); margin-bottom: 10px; }
-  .placeholder-card p { font-size: 14px; color: var(--color-border); line-height: 1.6; }
+  .placeholder-card p { font-size: 14px; color: var(--color-text-secondary); line-height: 1.6; }
   .placeholder-badge { display: inline-block; background: var(--color-bg); color: var(--color-accent); font-size: 11px; font-weight: 700; letter-spacing: 0.07em; padding: 4px 12px; border-radius: 99px; margin-bottom: 20px; text-transform: uppercase; }
 
   /* ── Settings ── */
@@ -197,7 +204,7 @@
   .settings-row { display: flex; align-items: center; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--color-border); }
   .settings-row:last-child { border-bottom: none; }
   .settings-row-label { font-size: 13px; color: var(--color-text); font-weight: 500; }
-  .settings-row-value { font-size: 13px; color: var(--color-border); }
+  .settings-row-value { font-size: 13px; color: var(--color-text-secondary); }
   .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
   .status-dot.green { background: var(--color-good); }
   .status-dot.red { background: var(--color-avoid); }
@@ -353,32 +360,32 @@
                 <tr>
                     <td>Action required: Michigan is exiting the IMLC, here's what to do</td>
                     <td>96</td>
-                    <td class="good">61.5%</td>
-                    <td class="bad">2.1%</td>
+                    <td><span class="pct-pill good">61.5%</span></td>
+                    <td><span class="pct-pill bad">2.1%</span></td>
                 </tr>
                 <tr>
                     <td>Submit multi-state enrollments easier with new license flexibility</td>
                     <td>245</td>
-                    <td class="good">48.6%</td>
-                    <td class="bad">0.8%</td>
+                    <td><span class="pct-pill good">48.6%</span></td>
+                    <td><span class="pct-pill bad">0.8%</span></td>
                 </tr>
                 <tr>
                     <td>Coming soon: Standard payer names will be required for all enrollment records</td>
                     <td>244</td>
-                    <td class="good">48.1%</td>
-                    <td class="bad">1.2%</td>
+                    <td><span class="pct-pill good">48.1%</span></td>
+                    <td><span class="pct-pill bad">1.2%</span></td>
                 </tr>
                 <tr>
                     <td>New Analytic reports are now available for Consumption and Provider Onboarding</td>
                     <td>146</td>
-                    <td class="good">46.6%</td>
-                    <td class="bad">0.0%</td>
+                    <td><span class="pct-pill good">46.6%</span></td>
+                    <td><span class="pct-pill bad">0.0%</span></td>
                 </tr>
                 <tr>
                     <td>Manage terminations & billing with more clarity</td>
                     <td>94</td>
-                    <td class="good">45.7%</td>
-                    <td class="bad">2.1%</td>
+                    <td><span class="pct-pill good">45.7%</span></td>
+                    <td><span class="pct-pill bad">2.1%</span></td>
                 </tr></tbody>
             </table>
         </div>
@@ -408,32 +415,32 @@
                 <tr>
                     <td>[You’re invited] How provider readiness impacts time to revenue (and costs some teams $1M+)</td>
                     <td>1,124</td>
-                    <td class="good">47.3%</td>
-                    <td class="bad">2.2%</td>
+                    <td><span class="pct-pill good">47.3%</span></td>
+                    <td><span class="pct-pill bad">2.2%</span></td>
                 </tr>
                 <tr>
                     <td>[Final chance for coffee]: Reduce onboarding delays and improve time to revenue</td>
                     <td>998</td>
-                    <td class="good">44.3%</td>
-                    <td class="bad">2.0%</td>
+                    <td><span class="pct-pill good">44.3%</span></td>
+                    <td><span class="pct-pill bad">2.0%</span></td>
                 </tr>
                 <tr>
                     <td>☕ Coffee Break? Is provider readiness slowing your time to revenue?</td>
                     <td>1,201</td>
-                    <td class="ok">37.5%</td>
-                    <td class="bad">2.4%</td>
+                    <td><span class="pct-pill ok">37.5%</span></td>
+                    <td><span class="pct-pill bad">2.4%</span></td>
                 </tr>
                 <tr>
                     <td>[Report] The 2026 State of Payer Enrollment and Medical Credentialing</td>
                     <td>1,793</td>
-                    <td class="ok">34.1%</td>
-                    <td class="bad">2.5%</td>
+                    <td><span class="pct-pill ok">34.1%</span></td>
+                    <td><span class="pct-pill bad">2.5%</span></td>
                 </tr>
                 <tr>
                     <td>  Test your operational readiness with this worksheet</td>
                     <td>83</td>
-                    <td class="ok">33.7%</td>
-                    <td class="bad">0.0%</td>
+                    <td><span class="pct-pill ok">33.7%</span></td>
+                    <td><span class="pct-pill bad">0.0%</span></td>
                 </tr></tbody>
             </table>
         </div>
@@ -463,32 +470,32 @@
                 <tr>
                     <td>Invitation: Executive Dinner at Flour + Water During JPM</td>
                     <td>79</td>
-                    <td class="good">44.3%</td>
-                    <td class="bad">1.3%</td>
+                    <td><span class="pct-pill good">44.3%</span></td>
+                    <td><span class="pct-pill bad">1.3%</span></td>
                 </tr>
                 <tr>
                     <td>In Vegas? Join us for Medallion’s Emerald Evening: A Wizard of Oz Sphere Experience</td>
                     <td>70</td>
-                    <td class="bad">24.3%</td>
-                    <td class="good">5.7%</td>
+                    <td><span class="pct-pill bad">24.3%</span></td>
+                    <td><span class="pct-pill good">5.7%</span></td>
                 </tr>
                 <tr>
                     <td>Invitation: Executive Dinner at Flour + Water During JPM</td>
                     <td>304</td>
-                    <td class="bad">22.1%</td>
-                    <td class="good">3.4%</td>
+                    <td><span class="pct-pill bad">22.1%</span></td>
+                    <td><span class="pct-pill good">3.4%</span></td>
                 </tr>
                 <tr>
                     <td>Final Seats Remaining for Our Exclusive Healthcare Leaders Dinner in Boston</td>
                     <td>1,463</td>
-                    <td class="bad">12.8%</td>
-                    <td class="ok">3.2%</td>
+                    <td><span class="pct-pill bad">12.8%</span></td>
+                    <td><span class="pct-pill ok">3.2%</span></td>
                 </tr>
                 <tr>
                     <td>A Seat at the Table: Join Medallion for an Exclusive Dinner at Aquavit in New York</td>
                     <td>1,336</td>
-                    <td class="bad">12.2%</td>
-                    <td class="bad">0.4%</td>
+                    <td><span class="pct-pill bad">12.2%</span></td>
+                    <td><span class="pct-pill bad">0.4%</span></td>
                 </tr></tbody>
             </table>
         </div>
@@ -518,32 +525,32 @@
                 <tr>
                     <td>Your December Roundup ✨</td>
                     <td>235</td>
-                    <td class="good">41.9%</td>
-                    <td class="bad">1.3%</td>
+                    <td><span class="pct-pill good">41.9%</span></td>
+                    <td><span class="pct-pill bad">1.3%</span></td>
                 </tr>
                 <tr>
                     <td>Your November Roundup ✨</td>
                     <td>202</td>
-                    <td class="good">41.8%</td>
-                    <td class="bad">2.5%</td>
+                    <td><span class="pct-pill good">41.8%</span></td>
+                    <td><span class="pct-pill bad">2.5%</span></td>
                 </tr>
                 <tr>
                     <td>Your July Roundup ✨</td>
                     <td>236</td>
-                    <td class="good">40.2%</td>
-                    <td class="bad">2.1%</td>
+                    <td><span class="pct-pill good">40.2%</span></td>
+                    <td><span class="pct-pill bad">2.1%</span></td>
                 </tr>
                 <tr>
                     <td>Your August Roundup ✨</td>
                     <td>316</td>
-                    <td class="ok">34.0%</td>
-                    <td class="bad">0.9%</td>
+                    <td><span class="pct-pill ok">34.0%</span></td>
+                    <td><span class="pct-pill bad">0.9%</span></td>
                 </tr>
                 <tr>
                     <td>Your October Roundup ✨</td>
                     <td>305</td>
-                    <td class="ok">32.9%</td>
-                    <td class="bad">0.3%</td>
+                    <td><span class="pct-pill ok">32.9%</span></td>
+                    <td><span class="pct-pill bad">0.3%</span></td>
                 </tr></tbody>
             </table>
         </div>
@@ -598,32 +605,32 @@
                 <tr>
                     <td>New profile completion logic is now live</td>
                     <td>78</td>
-                    <td class="good">55.1%</td>
-                    <td class="good">10.3%</td>
+                    <td><span class="pct-pill good">55.1%</span></td>
+                    <td><span class="pct-pill good">10.3%</span></td>
                 </tr>
                 <tr>
                     <td>New Analytic reports are now available for Provider Summary and Credentialing</td>
                     <td>94</td>
-                    <td class="good">51.1%</td>
-                    <td class="bad">0.0%</td>
+                    <td><span class="pct-pill good">51.1%</span></td>
+                    <td><span class="pct-pill bad">0.0%</span></td>
                 </tr>
                 <tr>
                     <td>A better analytics experience is coming your way</td>
                     <td>180</td>
-                    <td class="good">48.3%</td>
-                    <td class="bad">0.0%</td>
+                    <td><span class="pct-pill good">48.3%</span></td>
+                    <td><span class="pct-pill bad">0.0%</span></td>
                 </tr>
                 <tr>
                     <td>A new approach to profile completion will go live soon ✅</td>
                     <td>102</td>
-                    <td class="good">44.1%</td>
-                    <td class="bad">0.0%</td>
+                    <td><span class="pct-pill good">44.1%</span></td>
+                    <td><span class="pct-pill bad">0.0%</span></td>
                 </tr>
                 <tr>
                     <td>New Analytic reports are now available for Provider Summary and Credentialing</td>
                     <td>74</td>
-                    <td class="ok">33.8%</td>
-                    <td class="bad">0.0%</td>
+                    <td><span class="pct-pill ok">33.8%</span></td>
+                    <td><span class="pct-pill bad">0.0%</span></td>
                 </tr></tbody>
             </table>
         </div>
@@ -653,32 +660,32 @@
                 <tr>
                     <td>{{ contact.firstname }} $20 for your insights!</td>
                     <td>5,447</td>
-                    <td class="bad">19.7%</td>
-                    <td class="ok">3.0%</td>
+                    <td><span class="pct-pill bad">19.7%</span></td>
+                    <td><span class="pct-pill ok">3.0%</span></td>
                 </tr>
                 <tr>
                     <td>Share your experience with Medallion?</td>
                     <td>156</td>
-                    <td class="bad">19.5%</td>
-                    <td class="bad">1.9%</td>
+                    <td><span class="pct-pill bad">19.5%</span></td>
+                    <td><span class="pct-pill bad">1.9%</span></td>
                 </tr>
                 <tr>
                     <td>Last call to take Medallion’s annual benchmarking survey</td>
                     <td>4,888</td>
-                    <td class="bad">19.1%</td>
-                    <td class="bad">1.1%</td>
+                    <td><span class="pct-pill bad">19.1%</span></td>
+                    <td><span class="pct-pill bad">1.1%</span></td>
                 </tr>
                 <tr>
                     <td>Your insights are needed!</td>
                     <td>6,006</td>
-                    <td class="bad">17.6%</td>
-                    <td class="bad">2.1%</td>
+                    <td><span class="pct-pill bad">17.6%</span></td>
+                    <td><span class="pct-pill bad">2.1%</span></td>
                 </tr>
                 <tr>
                     <td>Share your thoughts on roster generation for delegated payer enrollments</td>
                     <td>95</td>
-                    <td class="bad">16.0%</td>
-                    <td class="bad">2.1%</td>
+                    <td><span class="pct-pill bad">16.0%</span></td>
+                    <td><span class="pct-pill bad">2.1%</span></td>
                 </tr></tbody>
             </table>
         </div>
@@ -1183,9 +1190,9 @@ function applyFilters() {
         <td class="type-cell">${ct}</td>
         <td>${a.count}</td>
         <td>${a.sent.toLocaleString()}</td>
-        <td class="${orCls}">${pct(a.open_rate)}</td>
-        <td class="${crCls}">${pct(a.click_rate)}</td>
-        <td class="${ctCls}">${pct(a.ctor)}</td>
+        <td><span class="pct-pill ${orCls}">${pct(a.open_rate)}</span></td>
+        <td><span class="pct-pill ${crCls}">${pct(a.click_rate)}</span></td>
+        <td><span class="pct-pill ${ctCls}">${pct(a.ctor)}</span></td>
       </tr>`;
     });
   tbody.innerHTML += `<tr class="benchmark-row"><td colspan="3">B2B SaaS benchmark</td><td>35%</td><td>3%</td><td>10%</td></tr>`;
