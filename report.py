@@ -8,6 +8,7 @@ and playbook insights per content type.
 
 import json
 import os
+import re
 import subprocess
 import time
 from collections import defaultdict
@@ -272,6 +273,61 @@ def _render_insight_groups(insights: list[dict]) -> str:
     return html
 
 
+def _render_playbook_panel(panel_id: str, data: dict, emails: list[EmailRecord], *, hidden: bool) -> str:
+    """
+    Render one playbook panel's inner HTML — shared by the unsegmented "All"
+    view and every persona-scoped variant, so insufficient_data/error/full
+    states only need to be handled in one place.
+    """
+    style = ' style="display:none"' if hidden else ""
+
+    if data.get("status") == "insufficient_data":
+        count = data.get("sample_count", 0)
+        minimum = data.get("minimum_required", 5)
+        return f"""
+        <div id="{panel_id}" class="playbook-panel"{style}>
+            <p class="insufficient-note">⚠ Insufficient data ({count} emails, need {minimum}+ for reliable analysis)</p>
+        </div>"""
+
+    if data.get("status") == "error":
+        return f"""
+        <div id="{panel_id}" class="playbook-panel"{style}>
+            <p class="insufficient-note">⚠ Analysis failed for this content type ({len(emails)} emails available) — {data.get('error', 'unknown error')}. Try regenerating the report.</p>
+        </div>"""
+
+    top = _top_emails(emails)
+    top_emails_html = ""
+    for e in top:
+        top_emails_html += f"""
+                <tr>
+                    <td>{e.subject}</td>
+                    <td>{e.sent:,}</td>
+                    <td><span class="pct-pill {_delta_class(e.open_rate, BENCHMARKS['open_rate'])}">{_pct(e.open_rate)}</span></td>
+                    <td><span class="pct-pill {_delta_class(e.click_rate, BENCHMARKS['click_rate'])}">{_pct(e.click_rate)}</span></td>
+                </tr>"""
+    if not top_emails_html:
+        top_emails_html = '<tr><td colspan="4">No emails with 50+ recipients</td></tr>'
+
+    insight_groups_html = _render_insight_groups(data.get("insights", []))
+
+    return f"""
+        <div id="{panel_id}" class="playbook-panel"{style}>
+            <h3 class="top-label">Top Performing Emails</h3>
+            <table class="top-emails">
+                <thead><tr><th>Subject</th><th>Sent</th><th>Open Rate</th><th>Click Rate</th></tr></thead>
+                <tbody>{top_emails_html}</tbody>
+            </table>
+            <div class="exec-summary">
+                <span class="exec-summary-label">What this tells us</span>
+                <p>{data['executive_summary']}</p>
+            </div>
+            {insight_groups_html}
+            <div class="data-quality-banner">
+                <strong>Data quality notes:</strong> {data['data_quality_note']}
+            </div>
+        </div>"""
+
+
 def _build_summary_rows(
     current_groups: dict[str, list[EmailRecord]],
     prior_groups: dict[str, list[EmailRecord]],
@@ -295,14 +351,9 @@ COWRITE_VIEW = """
        ondragover="cowriteDragOver(event)" ondragleave="cowriteDragLeave(event)" ondrop="cowriteDrop(event)">
     <p class="view-title">Co-write</p>
 
-    <div class="cowrite-attach-bar">
-      <input type="file" id="cowrite-file-input" multiple style="display:none"
-             accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,text/plain,text/markdown,.md,.docx"
-             onchange="handleCowriteFileInputChange(event)">
-      <button type="button" class="cowrite-attach-btn-bar" id="cowrite-attach-btn" title="Attach files"
-              onclick="document.getElementById('cowrite-file-input').click()">📎 Attach files, or paste a link below</button>
-    </div>
-    <div class="cowrite-attachments" id="cowrite-attachments"></div>
+    <input type="file" id="cowrite-file-input" multiple style="display:none"
+           accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,text/plain,text/markdown,.md,.docx"
+           onchange="handleCowriteFileInputChange(event)">
 
     <div id="cowrite-setup">
       <div class="cowrite-mode-toggle">
@@ -345,6 +396,12 @@ COWRITE_VIEW = """
           </div>
         </div>
 
+        <div class="cowrite-attach-bar">
+          <button type="button" class="cowrite-attach-btn-bar" id="cowrite-attach-btn" title="Attach files"
+                  onclick="document.getElementById('cowrite-file-input').click()">📎 Attach files, or paste a link above</button>
+        </div>
+        <div class="cowrite-attachments" id="cowrite-attachments-setup"></div>
+
         <div id="cowrite-setup-error" class="cowrite-error" style="display:none"></div>
         <button type="button" class="cowrite-start-btn" id="cowrite-start-btn" onclick="startCowriteSession()">Start</button>
       </div>
@@ -359,6 +416,7 @@ COWRITE_VIEW = """
         </div>
       </div>
       <div class="cowrite-messages" id="cowrite-messages"></div>
+      <div class="cowrite-attachments" id="cowrite-attachments-session"></div>
       <div class="cowrite-input-row">
         <button type="button" class="cowrite-attach-btn" id="cowrite-attach-btn-inline" title="Attach files"
                 onclick="document.getElementById('cowrite-file-input').click()">📎</button>
@@ -417,7 +475,7 @@ COWRITE_CSS = """
     width: 38px; height: 38px; font-size: 16px; cursor: pointer; flex-shrink: 0; line-height: 1;
   }
   .cowrite-attach-btn:hover { background: var(--color-good-bg); }
-  .cowrite-attach-bar { margin-bottom: 12px; }
+  .cowrite-attach-bar { margin-top: 16px; margin-bottom: 12px; }
   .cowrite-attach-btn-bar {
     background: white; border: 1px solid var(--color-border); border-radius: 8px;
     padding: 8px 14px; font-size: 13px; font-weight: 600; color: var(--color-text); cursor: pointer;
@@ -833,12 +891,17 @@ function renderCowriteLinkCard(att) {
   return el;
 }
 
+// Two separate .cowrite-attachments containers exist in the DOM — one in
+// the setup form (near Start), one in the session input row — since only
+// one of #cowrite-setup/#cowrite-session is ever visible at a time via
+// display:none. Rendering into all of them keeps whichever is visible in
+// sync without tracking which screen is currently active.
 function renderCowriteAttachments() {
-  const container = document.getElementById('cowrite-attachments');
-  if (!container) return;
-  container.innerHTML = '';
-  cowriteStagedAttachments.forEach(att => {
-    container.appendChild(att.kind === 'link' ? renderCowriteLinkCard(att) : renderCowriteChip(att));
+  document.querySelectorAll('.cowrite-attachments').forEach(container => {
+    container.innerHTML = '';
+    cowriteStagedAttachments.forEach(att => {
+      container.appendChild(att.kind === 'link' ? renderCowriteLinkCard(att) : renderCowriteChip(att));
+    });
   });
 }
 
@@ -1091,6 +1154,13 @@ function resetCowriteSession() {
 """
 
 
+def _persona_slug(persona: str) -> str:
+    """'Founder / CEO / President' -> 'founder-ceo-president', for panel/DOM ids."""
+    s = re.sub(r"\s+", "-", persona.lower().replace("/", "-"))
+    s = re.sub(r"-{2,}", "-", s)
+    return s.strip("-")
+
+
 def _render_html(
     all_emails: list[EmailRecord],
     rows: list[dict],
@@ -1103,6 +1173,10 @@ def _render_html(
     pipeline_start_date: str = PIPELINE_START_DATE,
     enable_cowrite: bool = False,
     cowrite_api_base: str = "",
+    persona_playbooks: Optional[dict[str, dict[str, dict]]] = None,
+    persona_email_groups: Optional[dict[str, dict[str, list[EmailRecord]]]] = None,
+    persona_confidence: Optional[dict[str, dict]] = None,
+    overall_unclassified_pct: float = 0.0,
 ) -> str:
     now_str = generated_at.strftime("%B %d, %Y at %I:%M %p UTC")
 
@@ -1132,69 +1206,43 @@ def _render_html(
     # Embed all emails as JSON for client-side filtering
     emails_json = _emails_to_json(all_emails)
 
-    # Build playbook panels (static — not affected by filters)
+    # Build playbook panels (static — not affected by filters). The "All"
+    # panels stay first/visible-by-default exactly as before; persona panels
+    # (panel-{persona-slug}-{anchor}) are appended hidden and toggled by JS
+    # when the persona dropdown changes — see selectPersona()/renderPlaybookPanel().
     playbook_panels = ""
     first = True
     all_types = sorted(playbook.keys())
 
     for ct in all_types:
-        data = playbook[ct]
         anchor = ct.replace(" ", "-")
         emails = current_groups.get(ct, [])
-        top = _top_emails(emails)
-        hidden = '' if first else 'style="display:none"'
+        hidden = not first
         first = False
+        playbook_panels += _render_playbook_panel(f"panel-{anchor}", playbook[ct], emails, hidden=hidden)
 
-        if data.get("status") == "insufficient_data":
-            count = data.get("sample_count", 0)
-            minimum = data.get("minimum_required", 5)
-            playbook_panels += f"""
-        <div id="panel-{anchor}" class="playbook-panel" {hidden}>
-            <p class="insufficient-note">⚠ Insufficient data ({count} emails, need {minimum}+ for reliable analysis)</p>
-        </div>"""
-            continue
-
-        if data.get("status") == "error":
-            playbook_panels += f"""
-        <div id="panel-{anchor}" class="playbook-panel" {hidden}>
-            <p class="insufficient-note">⚠ Analysis failed for this content type ({len(emails)} emails available) — {data.get('error', 'unknown error')}. Try regenerating the report.</p>
-        </div>"""
-            continue
-
-        top_emails_html = ""
-        for e in top:
-            top_emails_html += f"""
-                <tr>
-                    <td>{e.subject}</td>
-                    <td>{e.sent:,}</td>
-                    <td><span class="pct-pill {_delta_class(e.open_rate, BENCHMARKS['open_rate'])}">{_pct(e.open_rate)}</span></td>
-                    <td><span class="pct-pill {_delta_class(e.click_rate, BENCHMARKS['click_rate'])}">{_pct(e.click_rate)}</span></td>
-                </tr>"""
-        if not top_emails_html:
-            top_emails_html = '<tr><td colspan="4">No emails with 50+ recipients</td></tr>'
-
-        insight_groups_html = _render_insight_groups(data.get("insights", []))
-
-        playbook_panels += f"""
-        <div id="panel-{anchor}" class="playbook-panel" {hidden}>
-            <h3 class="top-label">Top Performing Emails</h3>
-            <table class="top-emails">
-                <thead><tr><th>Subject</th><th>Sent</th><th>Open Rate</th><th>Click Rate</th></tr></thead>
-                <tbody>{top_emails_html}</tbody>
-            </table>
-            <div class="exec-summary">
-                <span class="exec-summary-label">What this tells us</span>
-                <p>{data['executive_summary']}</p>
-            </div>
-            {insight_groups_html}
-            <div class="data-quality-banner">
-                <strong>Data quality notes:</strong> {data['data_quality_note']}
-            </div>
-        </div>"""
+    persona_playbooks = persona_playbooks or {}
+    persona_email_groups = persona_email_groups or {}
+    persona_confidence = persona_confidence or {}
+    persona_slugs: dict[str, str] = {}  # persona name -> slug, for the JSON below
+    persona_playbook_meta: dict[str, dict] = {}
+    for persona, persona_groups in persona_playbooks.items():
+        slug = _persona_slug(persona)
+        persona_slugs[persona] = slug
+        persona_playbook_meta[slug] = {}
+        for ct, data in persona_groups.items():
+            anchor = ct.replace(" ", "-")
+            emails = [] if "status" in data else persona_email_groups.get(persona, {}).get(ct, [])
+            playbook_panels += _render_playbook_panel(f"panel-{slug}-{anchor}", data, emails, hidden=True)
+            persona_playbook_meta[slug][anchor] = {"title": ct.title(), "count": data.get("sample_count", "")}
 
     playbook_data_json = json.dumps({
         ct.replace(" ", "-"): {"title": ct.title(), "count": playbook[ct].get("sample_count", "")}
         for ct in all_types if "status" not in playbook[ct]
+    })
+    persona_playbook_meta_json = json.dumps(persona_playbook_meta)
+    persona_confidence_json = json.dumps({
+        persona_slugs[persona]: conf for persona, conf in persona_confidence.items() if persona in persona_slugs
     })
     first_anchor = all_types[0].replace(" ", "-") if all_types else ""
     first_title = all_types[0].title() if all_types else ""

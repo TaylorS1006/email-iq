@@ -20,6 +20,11 @@ load_dotenv()
 
 _BASE = "https://api.hubapi.com"
 
+# Internal addresses excluded from recipient-facing fetches (matches
+# pipeline.py's INTERNAL_DOMAIN — kept as a separate constant here since
+# pipeline.py's tiering logic is deliberately isolated from this module).
+_INTERNAL_DOMAIN = "medallion.co"
+
 # Emails that have actually been sent (batch) or are live (automated)
 _SENT_STATES = {"PUBLISHED", "AUTOMATED"}
 
@@ -256,6 +261,82 @@ def fetch_lists(*, token: Optional[str] = None) -> list[dict]:
         offset += len(page)
 
     return sorted(lists, key=lambda l: l["name"].lower())
+
+
+def fetch_event_recipients(
+    campaign_id: str,
+    event_type: str,
+    *,
+    token: Optional[str] = None,
+) -> set[str]:
+    """
+    Return the set of recipient email addresses with an event of `event_type`
+    (e.g. "DELIVERED", "OPEN", "CLICK") for one campaign, via the same
+    /email/public/v1/events endpoint pipeline.py's _get_clicked_emails uses
+    for CLICK. Excludes internal @medallion.co addresses.
+    """
+    token = token or os.environ["HUBSPOT_ACCESS_TOKEN"]
+    session = _session(token)
+
+    recipients: set[str] = set()
+    offset = None
+    while True:
+        params: dict = {"campaignId": campaign_id, "eventType": event_type, "limit": 1000}
+        if offset:
+            params["offset"] = offset
+        r = session.get(f"{_BASE}/email/public/v1/events", params=params)
+        r.raise_for_status()
+        data = r.json()
+        for ev in data.get("events", []):
+            email = ev.get("recipient", "").lower()
+            if not email or email.endswith(f"@{_INTERNAL_DOMAIN}"):
+                continue
+            recipients.add(email)
+        if not data.get("hasMore"):
+            break
+        offset = data.get("offset")
+
+    return recipients
+
+
+def fetch_contacts_by_email(
+    emails: list[str],
+    *,
+    token: Optional[str] = None,
+    properties: Optional[list[str]] = None,
+) -> dict[str, dict]:
+    """
+    Batch-fetch contact properties by email address via
+    POST /crm/v3/objects/contacts/batch/read (idProperty=email), chunked by
+    100 per HubSpot's batch limit.
+
+    Returns {email.lower(): {property_name: value, ...}}. Emails with no
+    matching contact are simply absent from the result.
+    """
+    token = token or os.environ["HUBSPOT_ACCESS_TOKEN"]
+    session = _session(token)
+    properties = properties or ["jobtitle"]
+
+    results: dict[str, dict] = {}
+    unique_emails = list({e.lower() for e in emails if e})
+
+    for batch in (unique_emails[i:i + 100] for i in range(0, len(unique_emails), 100)):
+        resp = session.post(
+            f"{_BASE}/crm/v3/objects/contacts/batch/read",
+            json={
+                "idProperty": "email",
+                "properties": properties,
+                "inputs": [{"id": email} for email in batch],
+            },
+        )
+        resp.raise_for_status()
+        for record in resp.json().get("results", []):
+            props = record.get("properties", {})
+            email = (props.get("email") or "").lower()
+            if email:
+                results[email] = props
+
+    return results
 
 
 def fetch_emails(

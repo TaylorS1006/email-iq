@@ -125,6 +125,50 @@ def _analyze_content_type(
     return json.loads(text)
 
 
+def _build_playbook_from_groups(
+    client: anthropic.Anthropic,
+    groups: dict[str, list["EmailRecord"]],
+    *,
+    label: str = "",
+) -> dict[str, dict]:
+    """
+    Given content_type -> emails groups (already fetched/filtered by the
+    caller — e.g. persona-scoped synthetic EmailRecords), run the same
+    per-content-type Claude analysis build_playbook uses. Types with fewer
+    than MIN_SAMPLE_SIZE emails are marked 'insufficient_data' without an
+    API call, same as the unsegmented path.
+    """
+    prefix = f"[{label}] " if label else ""
+    playbook: dict[str, dict] = {}
+
+    for content_type, group in sorted(groups.items(), key=lambda x: -len(x[1])):
+        if content_type == "unknown":
+            continue
+
+        if len(group) < MIN_SAMPLE_SIZE:
+            print(
+                f"{prefix}[{content_type}] Insufficient data ({len(group)} emails, need {MIN_SAMPLE_SIZE}+)"
+            )
+            playbook[content_type] = {
+                "status": "insufficient_data",
+                "sample_count": len(group),
+                "minimum_required": MIN_SAMPLE_SIZE,
+            }
+            continue
+
+        print(f"{prefix}[{content_type}] Analyzing {len(group)} emails…")
+        try:
+            result = _analyze_content_type(client, content_type, group)
+            result["sample_count"] = len(group)
+            playbook[content_type] = result
+            print(f"  ✓ Done")
+        except Exception as exc:
+            print(f"  ✗ Error: {exc}")
+            playbook[content_type] = {"status": "error", "error": str(exc)}
+
+    return playbook
+
+
 def build_playbook(
     *,
     days: int = 365,
@@ -152,35 +196,30 @@ def build_playbook(
 
     client = anthropic.Anthropic(api_key=token or os.environ["ANTHROPIC_API_KEY"])
 
-    playbook: dict[str, dict] = {}
+    return _build_playbook_from_groups(client, groups)
 
-    for content_type, group in sorted(groups.items(), key=lambda x: -len(x[1])):
-        if content_type == "unknown":
-            print(f"\nSkipping 'unknown' ({len(group)} emails — no content type parsed)")
-            continue
 
-        if len(group) < MIN_SAMPLE_SIZE:
-            print(
-                f"\n[{content_type}] Insufficient data ({len(group)} emails, need {MIN_SAMPLE_SIZE}+)"
-            )
-            playbook[content_type] = {
-                "status": "insufficient_data",
-                "sample_count": len(group),
-                "minimum_required": MIN_SAMPLE_SIZE,
-            }
-            continue
+def build_persona_playbooks(
+    persona_email_groups: dict[str, dict[str, list[EmailRecord]]],
+    *,
+    token: Optional[str] = None,
+) -> dict[str, dict[str, dict]]:
+    """
+    Run the same per-content-type Claude analysis once per persona, against
+    already persona-scoped emails (see persona_data.persona_groups_for —
+    callers build `persona_email_groups` once and reuse it both here and for
+    rendering, since analyzer.py stays agnostic of persona_config internals).
 
-        print(f"\n[{content_type}] Analyzing {len(group)} emails…")
-        try:
-            result = _analyze_content_type(client, content_type, group)
-            result["sample_count"] = len(group)
-            playbook[content_type] = result
-            print(f"  ✓ Done")
-        except Exception as exc:
-            print(f"  ✗ Error: {exc}")
-            playbook[content_type] = {"status": "error", "error": str(exc)}
+    Returns {persona: {content_type: result_or_status}}.
+    """
+    client = anthropic.Anthropic(api_key=token or os.environ["ANTHROPIC_API_KEY"])
 
-    return playbook
+    playbooks: dict[str, dict[str, dict]] = {}
+    for persona, persona_groups in persona_email_groups.items():
+        print(f"\n[persona: {persona}] {sum(len(v) for v in persona_groups.values())} eligible emails across {len(persona_groups)} content types")
+        playbooks[persona] = _build_playbook_from_groups(client, persona_groups, label=f"persona: {persona}")
+
+    return playbooks
 
 
 def _print_playbook(playbook: dict[str, dict]) -> None:
