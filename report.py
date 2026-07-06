@@ -291,8 +291,18 @@ COWRITE_NAV = '<button class="nav-item" onclick="switchView(\'cowrite\', this); 
 
 COWRITE_VIEW = """
   <!-- Co-write -->
-  <div id="view-cowrite" class="view">
+  <div id="view-cowrite" class="view"
+       ondragover="cowriteDragOver(event)" ondragleave="cowriteDragLeave(event)" ondrop="cowriteDrop(event)">
     <p class="view-title">Co-write</p>
+
+    <div class="cowrite-attach-bar">
+      <input type="file" id="cowrite-file-input" multiple style="display:none"
+             accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,text/plain,text/markdown,.md,.docx"
+             onchange="handleCowriteFileInputChange(event)">
+      <button type="button" class="cowrite-attach-btn-bar" id="cowrite-attach-btn" title="Attach files"
+              onclick="document.getElementById('cowrite-file-input').click()">📎 Attach files, or paste a link below</button>
+    </div>
+    <div class="cowrite-attachments" id="cowrite-attachments"></div>
 
     <div id="cowrite-setup">
       <div class="cowrite-mode-toggle">
@@ -319,7 +329,8 @@ COWRITE_VIEW = """
 
         <div id="cowrite-write-fields">
           <label class="cowrite-sentence-label">This is a <strong>[content type]</strong> email going to <strong>[audience list]</strong> about:</label>
-          <textarea id="cowrite-topic" class="cowrite-textarea" rows="3" placeholder="e.g. our new provider credentialing turnaround-time guarantee"></textarea>
+          <textarea id="cowrite-topic" class="cowrite-textarea" rows="3" placeholder="e.g. our new provider credentialing turnaround-time guarantee"
+                    oninput="scanCowriteInputForLinks('cowrite-topic')" onpaste="setTimeout(() => scanCowriteInputForLinks('cowrite-topic'), 0)"></textarea>
         </div>
 
         <div id="cowrite-review-fields" style="display:none">
@@ -329,7 +340,8 @@ COWRITE_VIEW = """
           </div>
           <div class="filter-group" style="width:100%; margin-top:12px">
             <label>Email Body — Paste your email copy here</label>
-            <textarea id="cowrite-review-body" class="cowrite-textarea" rows="8" placeholder="Paste your email copy here"></textarea>
+            <textarea id="cowrite-review-body" class="cowrite-textarea" rows="8" placeholder="Paste your email copy here"
+                      oninput="scanCowriteInputForLinks('cowrite-review-body')" onpaste="setTimeout(() => scanCowriteInputForLinks('cowrite-review-body'), 0)"></textarea>
           </div>
         </div>
 
@@ -348,7 +360,10 @@ COWRITE_VIEW = """
       </div>
       <div class="cowrite-messages" id="cowrite-messages"></div>
       <div class="cowrite-input-row">
-        <textarea id="cowrite-input" class="cowrite-input" rows="2" placeholder="Ask a follow-up or request a revision…" onkeydown="cowriteInputKeydown(event)"></textarea>
+        <button type="button" class="cowrite-attach-btn" id="cowrite-attach-btn-inline" title="Attach files"
+                onclick="document.getElementById('cowrite-file-input').click()">📎</button>
+        <textarea id="cowrite-input" class="cowrite-input" rows="2" placeholder="Ask a follow-up or request a revision… (paste a link or attach a file)"
+                  onkeydown="cowriteInputKeydown(event)" oninput="scanCowriteInputForLinks()" onpaste="setTimeout(scanCowriteInputForLinks, 0)"></textarea>
         <button type="button" class="cowrite-send-btn" id="cowrite-send-btn" onclick="sendCowriteMessage()">Send</button>
       </div>
     </div>
@@ -397,6 +412,51 @@ COWRITE_CSS = """
   .cowrite-input-row { display: flex; gap: 10px; align-items: flex-end; }
   .cowrite-input { flex: 1; border: 1px solid var(--color-border); border-radius: 8px; padding: 10px 12px; font-size: 13px; font-family: inherit; color: var(--color-text); resize: vertical; }
   .cowrite-input-row .cowrite-send-btn { margin-top: 0; }
+  .cowrite-attach-btn {
+    background: white; border: 1px solid var(--color-border); border-radius: 8px;
+    width: 38px; height: 38px; font-size: 16px; cursor: pointer; flex-shrink: 0; line-height: 1;
+  }
+  .cowrite-attach-btn:hover { background: var(--color-good-bg); }
+  .cowrite-attach-bar { margin-bottom: 12px; }
+  .cowrite-attach-btn-bar {
+    background: white; border: 1px solid var(--color-border); border-radius: 8px;
+    padding: 8px 14px; font-size: 13px; font-weight: 600; color: var(--color-text); cursor: pointer;
+  }
+  .cowrite-attach-btn-bar:hover { background: var(--color-good-bg); }
+  .view.cowrite-dragover {
+    outline: 2px dashed var(--color-primary-hover); outline-offset: -6px; background: var(--color-good-bg);
+    border-radius: 12px;
+  }
+  .cowrite-attachments { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+  .cowrite-attachments:empty { margin-bottom: 0; }
+  .cowrite-chip {
+    display: flex; align-items: center; gap: 8px; background: white; border: 1px solid var(--color-border);
+    border-radius: 8px; padding: 6px 8px 6px 6px; font-size: 12px; max-width: 240px;
+  }
+  .cowrite-chip.error { border-color: var(--color-avoid); }
+  .cowrite-chip-thumb { width: 26px; height: 26px; border-radius: 4px; object-fit: cover; flex-shrink: 0; }
+  .cowrite-chip-icon {
+    width: 26px; height: 26px; border-radius: 4px; background: var(--color-good-bg);
+    display: flex; align-items: center; justify-content: center; font-size: 13px; flex-shrink: 0;
+  }
+  .cowrite-chip-info { display: flex; flex-direction: column; min-width: 0; }
+  .cowrite-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 150px; color: var(--color-text); }
+  .cowrite-chip-status { color: var(--color-text-secondary); font-style: italic; }
+  .cowrite-chip-error-text { color: var(--color-avoid); }
+  .cowrite-chip-remove {
+    border: none; background: none; cursor: pointer; color: var(--color-text-secondary);
+    font-size: 15px; line-height: 1; padding: 0 2px; flex-shrink: 0; margin-left: auto;
+  }
+  .cowrite-chip-remove:hover { color: var(--color-avoid); }
+  .cowrite-link-card {
+    display: flex; flex-direction: column; gap: 2px; background: white; border: 1px solid var(--color-border);
+    border-radius: 8px; padding: 8px 22px 8px 10px; font-size: 12px; max-width: 260px; position: relative;
+  }
+  .cowrite-link-card.error { border-color: var(--color-avoid); }
+  .cowrite-link-card .cowrite-chip-remove { position: absolute; top: 4px; right: 6px; margin-left: 0; }
+  .cowrite-link-title { font-weight: 600; color: var(--color-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cowrite-link-domain { color: var(--color-text-secondary); }
+  .cowrite-link-retry { color: var(--color-primary-hover); cursor: pointer; text-decoration: underline; font-size: 11px; }
 """
 
 COWRITE_JS = """
@@ -407,6 +467,13 @@ let cowriteSystemPrompt = '';
 let cowriteSessionType = '';
 let cowritePlaybookByType = {};
 let cowriteInitialized = false;
+let cowriteStagedAttachments = [];
+let cowriteAttachmentSeq = 0;
+
+const COWRITE_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const COWRITE_MAX_DOC_BYTES = 32 * 1024 * 1024;
+const COWRITE_MAX_TEXT_CHARS = 200000;
+const COWRITE_URL_RE = /https?:\\/\\/[^\\s<>"']+/g;
 
 // COWRITE_API_BASE / COWRITE_GATED are emitted just above this block by
 // _render_html — empty base = same-origin local dev server (cowrite_server.py,
@@ -503,6 +570,301 @@ function onCowriteAudienceChange() {
   metaEl.textContent = formatAudienceMeta(getSelectedAudienceMeta());
 }
 
+// ── Co-write attachments ──────────────────────────────────────
+function cowriteNextAttachmentId() { return 'att-' + (++cowriteAttachmentSeq); }
+
+function classifyCowriteFile(file) {
+  const name = file.name || '';
+  const ext = name.toLowerCase().split('.').pop();
+  if (file.type.indexOf('image/') === 0 || ['png', 'jpg', 'jpeg', 'gif', 'webp'].indexOf(ext) !== -1) return 'image';
+  if (file.type === 'application/pdf' || ext === 'pdf') return 'pdf';
+  if (ext === 'docx' || file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') return 'docx';
+  if (file.type.indexOf('text/') === 0 || ['txt', 'md', 'markdown'].indexOf(ext) !== -1) return 'text';
+  return null;
+}
+
+function cowriteFileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result.split(',')[1]);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+function cowriteFileToText(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsText(file);
+  });
+}
+
+// Reads/parses each file client-side where possible (image, plain text) and
+// defers to the backend only for docx (needs python-docx — not available in
+// the public Cloudflare Worker, so that path can 404/error there; see
+// cowrite_server.py's /api/extract-file). PDFs need no extraction at all —
+// they're passed to Claude as native base64 document blocks in
+// buildCowriteContentBlocks, which both backends support since it's just
+// forwarded straight to the Anthropic API.
+function addCowriteFiles(fileList) {
+  Array.from(fileList).forEach(file => {
+    const kind = classifyCowriteFile(file);
+    const id = cowriteNextAttachmentId();
+    if (!kind) {
+      cowriteStagedAttachments.push({ id, kind: 'unknown', name: file.name, status: 'error', error: 'Unsupported file type.' });
+      renderCowriteAttachments();
+      return;
+    }
+    const maxBytes = kind === 'image' ? COWRITE_MAX_IMAGE_BYTES : COWRITE_MAX_DOC_BYTES;
+    if (file.size > maxBytes) {
+      cowriteStagedAttachments.push({
+        id, kind, name: file.name, status: 'error',
+        error: `File too large (max ${(maxBytes / (1024 * 1024)).toFixed(0)}MB).`,
+      });
+      renderCowriteAttachments();
+      return;
+    }
+
+    const att = { id, kind, name: file.name, status: 'pending', error: null };
+    cowriteStagedAttachments.push(att);
+    renderCowriteAttachments();
+
+    if (kind === 'image' || kind === 'pdf') {
+      cowriteFileToBase64(file)
+        .then(data => {
+          att.mediaType = file.type || (kind === 'pdf' ? 'application/pdf' : 'image/png');
+          att.data = data;
+          if (kind === 'image') att.previewUrl = 'data:' + att.mediaType + ';base64,' + data;
+          att.status = 'ready';
+          renderCowriteAttachments();
+        })
+        .catch(() => { att.status = 'error'; att.error = 'Could not read file.'; renderCowriteAttachments(); });
+    } else if (kind === 'text') {
+      cowriteFileToText(file)
+        .then(text => {
+          att.text = text.slice(0, COWRITE_MAX_TEXT_CHARS);
+          att.status = 'ready';
+          renderCowriteAttachments();
+        })
+        .catch(() => { att.status = 'error'; att.error = 'Could not read file.'; renderCowriteAttachments(); });
+    } else if (kind === 'docx') {
+      cowriteFileToBase64(file)
+        .then(data => cowriteFetch('/api/extract-file', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: file.name, media_type: file.type, data }),
+        }))
+        .then(r => { if (!r.ok) return r.json().then(e => Promise.reject(e)); return r.json(); })
+        .then(result => {
+          att.text = (result.text || '').slice(0, COWRITE_MAX_TEXT_CHARS);
+          att.status = 'ready';
+          renderCowriteAttachments();
+        })
+        .catch(err => {
+          att.status = 'error';
+          att.error = (err && (err.error || err.message)) || "This file type isn't supported on this deployment.";
+          renderCowriteAttachments();
+        });
+    }
+  });
+}
+
+function handleCowriteFileInputChange(evt) {
+  addCowriteFiles(evt.target.files);
+  evt.target.value = '';
+}
+
+// Drag-and-drop is bound on the whole #view-cowrite tab (not just the chat
+// area) so it works identically on the setup screen and mid-session.
+function cowriteDragOver(evt) {
+  evt.preventDefault();
+  document.getElementById('view-cowrite').classList.add('cowrite-dragover');
+}
+
+function cowriteDragLeave(evt) {
+  document.getElementById('view-cowrite').classList.remove('cowrite-dragover');
+}
+
+function cowriteDrop(evt) {
+  evt.preventDefault();
+  document.getElementById('view-cowrite').classList.remove('cowrite-dragover');
+  if (evt.dataTransfer && evt.dataTransfer.files && evt.dataTransfer.files.length) {
+    addCowriteFiles(evt.dataTransfer.files);
+  }
+}
+
+function removeCowriteAttachment(id) {
+  cowriteStagedAttachments = cowriteStagedAttachments.filter(a => a.id !== id);
+  renderCowriteAttachments();
+}
+
+function fetchCowriteLink(att) {
+  att.status = 'pending';
+  att.error = null;
+  renderCowriteAttachments();
+  cowriteFetch('/api/fetch-link', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url: att.url }),
+  })
+    .then(r => { if (!r.ok) return r.json().then(e => Promise.reject(e)); return r.json(); })
+    .then(result => {
+      att.title = result.title || att.url;
+      att.domain = result.domain || '';
+      att.text = (result.text || '').slice(0, COWRITE_MAX_TEXT_CHARS);
+      att.status = 'ready';
+      renderCowriteAttachments();
+    })
+    .catch(err => {
+      att.status = 'error';
+      att.error = (err && (err.error || err.message)) || "Couldn't fetch this link (it may require login, or timed out).";
+      renderCowriteAttachments();
+    });
+}
+
+function retryCowriteLink(id) {
+  const att = cowriteStagedAttachments.find(a => a.id === id);
+  if (att) fetchCowriteLink(att);
+}
+
+// Detects URLs typed/pasted into the input, immediately lifts them out into
+// their own pending link card, and kicks off the fetch automatically — same
+// "paste and go" flow as attaching a file, no separate confirm step. Shared
+// across every free-text field that can carry a link: the session follow-up
+// box, and the setup screen's topic / review-body fields.
+function scanCowriteInputForLinks(inputId) {
+  const input = document.getElementById(inputId || 'cowrite-input');
+  const matches = input.value.match(COWRITE_URL_RE);
+  if (!matches) return;
+  let value = input.value;
+  matches.forEach(rawUrl => {
+    const url = rawUrl.replace(/[.,;:!?)\\]]+$/, '');
+    if (cowriteStagedAttachments.some(a => a.kind === 'link' && a.url === url)) return;
+    value = value.replace(rawUrl, '');
+    const att = { id: cowriteNextAttachmentId(), kind: 'link', url, status: 'pending', error: null };
+    cowriteStagedAttachments.push(att);
+    fetchCowriteLink(att);
+  });
+  input.value = value.replace(/\\s{2,}/g, ' ').trim();
+  renderCowriteAttachments();
+}
+
+function renderCowriteChip(att) {
+  const el = document.createElement('div');
+  el.className = 'cowrite-chip' + (att.status === 'error' ? ' error' : '');
+
+  let thumb;
+  if (att.kind === 'image' && att.previewUrl) {
+    thumb = document.createElement('img');
+    thumb.className = 'cowrite-chip-thumb';
+    thumb.src = att.previewUrl;
+  } else {
+    thumb = document.createElement('div');
+    thumb.className = 'cowrite-chip-icon';
+    thumb.textContent = att.kind === 'pdf' ? '📄' : att.kind === 'docx' ? '📝' : att.kind === 'text' ? '📃' : '❓';
+  }
+  el.appendChild(thumb);
+
+  const info = document.createElement('div');
+  info.className = 'cowrite-chip-info';
+  const name = document.createElement('span');
+  name.className = 'cowrite-chip-name';
+  name.title = att.name;
+  name.textContent = att.name;
+  info.appendChild(name);
+  if (att.status === 'pending') {
+    const status = document.createElement('span');
+    status.className = 'cowrite-chip-status';
+    status.textContent = 'Processing…';
+    info.appendChild(status);
+  } else if (att.status === 'error') {
+    const status = document.createElement('span');
+    status.className = 'cowrite-chip-error-text';
+    status.textContent = att.error || 'Failed to process.';
+    info.appendChild(status);
+  }
+  el.appendChild(info);
+
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'cowrite-chip-remove';
+  remove.textContent = '×';
+  remove.title = 'Remove';
+  remove.onclick = () => removeCowriteAttachment(att.id);
+  el.appendChild(remove);
+  return el;
+}
+
+function renderCowriteLinkCard(att) {
+  const el = document.createElement('div');
+  el.className = 'cowrite-link-card' + (att.status === 'error' ? ' error' : '');
+
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'cowrite-chip-remove';
+  remove.textContent = '×';
+  remove.title = 'Remove';
+  remove.onclick = () => removeCowriteAttachment(att.id);
+  el.appendChild(remove);
+
+  const title = document.createElement('div');
+  title.className = 'cowrite-link-title';
+  title.textContent = att.status === 'pending' ? 'Fetching link…' : (att.title || att.url);
+  el.appendChild(title);
+
+  const domain = document.createElement('div');
+  domain.className = 'cowrite-link-domain';
+  domain.textContent = att.domain || att.url;
+  el.appendChild(domain);
+
+  if (att.status === 'error') {
+    const err = document.createElement('div');
+    err.className = 'cowrite-chip-error-text';
+    err.textContent = att.error || "Couldn't fetch this link.";
+    el.appendChild(err);
+    const retry = document.createElement('span');
+    retry.className = 'cowrite-link-retry';
+    retry.textContent = 'Retry';
+    retry.onclick = () => retryCowriteLink(att.id);
+    el.appendChild(retry);
+  }
+  return el;
+}
+
+function renderCowriteAttachments() {
+  const container = document.getElementById('cowrite-attachments');
+  if (!container) return;
+  container.innerHTML = '';
+  cowriteStagedAttachments.forEach(att => {
+    container.appendChild(att.kind === 'link' ? renderCowriteLinkCard(att) : renderCowriteChip(att));
+  });
+}
+
+// Turns the currently staged, successfully-processed attachments plus the
+// typed text into Claude content blocks for one user message. Images/PDFs go
+// through as native multimodal blocks (base64) — no server round-trip needed
+// since the Anthropic API reads them directly. Text/docx/link content is
+// inlined as plain text blocks ahead of the user's own message.
+function buildCowriteContentBlocks(text, attachments) {
+  const blocks = [];
+  attachments.forEach(att => {
+    if (att.status !== 'ready') return;
+    if (att.kind === 'image') {
+      blocks.push({ type: 'image', source: { type: 'base64', media_type: att.mediaType, data: att.data } });
+    } else if (att.kind === 'pdf') {
+      blocks.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: att.data } });
+    } else if (att.kind === 'text' || att.kind === 'docx') {
+      blocks.push({ type: 'text', text: `[Attached file: ${att.name}]\\n${att.text}` });
+    } else if (att.kind === 'link') {
+      blocks.push({ type: 'text', text: `[Linked page: ${att.title || att.url} (${att.domain || ''})]\\n${att.text || ''}` });
+    }
+  });
+  if (text) blocks.push({ type: 'text', text });
+  return blocks;
+}
+
 function setCowriteMode(mode) {
   cowriteMode = mode;
   document.getElementById('cowrite-mode-write').classList.toggle('active', mode === 'write');
@@ -565,6 +927,12 @@ function startCowriteSession() {
     return;
   }
 
+  if (cowriteStagedAttachments.some(a => a.status === 'pending')) {
+    errEl.textContent = 'Attachments are still processing — wait a moment and try again.';
+    errEl.style.display = '';
+    return;
+  }
+
   let topic, subject, body;
   if (cowriteMode === 'write') {
     topic = document.getElementById('cowrite-topic').value.trim();
@@ -603,7 +971,17 @@ function startCowriteSession() {
   document.getElementById('cowrite-session-meta').textContent = `${contentTypeLabel} · ${audienceName}`;
   document.getElementById('cowrite-messages').innerHTML = '';
 
-  sendCowriteTurn(firstMessage);
+  // Anything attached on the setup screen (reference docs, a style guide
+  // link, etc.) rides into this first message the same way a mid-session
+  // attachment rides into a follow-up — see buildCowriteContentBlocks.
+  const readyAttachments = cowriteStagedAttachments.filter(a => a.status === 'ready');
+  const blocks = buildCowriteContentBlocks(firstMessage, readyAttachments);
+  const displayParts = readyAttachments.map(a => a.kind === 'link' ? `🔗 ${a.title || a.url}` : `📎 ${a.name}`);
+  displayParts.push(firstMessage);
+  cowriteStagedAttachments = cowriteStagedAttachments.filter(a => a.status !== 'ready');
+  renderCowriteAttachments();
+
+  sendCowriteTurn(blocks.length === 1 && blocks[0].type === 'text' ? blocks[0].text : blocks, displayParts.join('\\n'));
 }
 
 function renderCowriteBubble(role, text, extraClass) {
@@ -615,9 +993,12 @@ function renderCowriteBubble(role, text, extraClass) {
   return el;
 }
 
-function sendCowriteTurn(userText) {
-  cowriteMessages.push({ role: 'user', content: userText });
-  renderCowriteBubble('user', userText);
+// `content` is what's sent to Claude (a plain string, or a content-block
+// array when attachments are involved); `displayText` is always plain text
+// for the chat bubble, since block arrays shouldn't be rendered raw.
+function sendCowriteTurn(content, displayText) {
+  cowriteMessages.push({ role: 'user', content });
+  renderCowriteBubble('user', displayText);
 
   const sendBtn = document.getElementById('cowrite-send-btn');
   if (sendBtn) sendBtn.disabled = true;
@@ -642,12 +1023,31 @@ function sendCowriteTurn(userText) {
     .finally(() => { if (sendBtn) sendBtn.disabled = false; });
 }
 
+// Attachments already sent in a prior turn live on inside cowriteMessages
+// (the full history is resent to /api/chat every turn, same as plain text
+// always has been) — so nothing extra is needed to keep them "in context"
+// for the rest of the session; only the newly staged ones are bundled here.
 function sendCowriteMessage() {
   const input = document.getElementById('cowrite-input');
+  scanCowriteInputForLinks();
   const text = input.value.trim();
-  if (!text) return;
+  const readyAttachments = cowriteStagedAttachments.filter(a => a.status === 'ready');
+  const stillProcessing = cowriteStagedAttachments.some(a => a.status === 'pending');
+  if (stillProcessing) return;
+  if (!text && !readyAttachments.length) return;
+
+  const blocks = buildCowriteContentBlocks(text, readyAttachments);
+  const displayParts = [];
+  if (text) displayParts.push(text);
+  readyAttachments.forEach(a => displayParts.push(a.kind === 'link' ? `🔗 ${a.title || a.url}` : `📎 ${a.name}`));
+
   input.value = '';
-  sendCowriteTurn(text);
+  // Errored attachments stay staged (so the user can see/remove/retry them)
+  // rather than silently disappearing — only what actually got sent clears.
+  cowriteStagedAttachments = cowriteStagedAttachments.filter(a => a.status !== 'ready');
+  renderCowriteAttachments();
+
+  sendCowriteTurn(blocks.length === 1 && blocks[0].type === 'text' ? blocks[0].text : blocks, displayParts.join('\\n'));
 }
 
 function cowriteInputKeydown(evt) {
@@ -682,6 +1082,8 @@ function refreshCowritePlaybook() {
 function resetCowriteSession() {
   cowriteMessages = [];
   cowriteSystemPrompt = '';
+  cowriteStagedAttachments = [];
+  renderCowriteAttachments();
   document.getElementById('cowrite-session').style.display = 'none';
   document.getElementById('cowrite-setup').style.display = '';
   document.getElementById('cowrite-setup-error').style.display = 'none';

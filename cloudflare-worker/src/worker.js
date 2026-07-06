@@ -260,6 +260,68 @@ async function analyzeContentType(contentType, emails, anthropicKey) {
   return toolUse.input;
 }
 
+const LINK_FETCH_TIMEOUT_MS = 8000;
+const LINK_TEXT_MAX_CHARS = 6000;
+
+// Uses the native HTMLRewriter streaming API instead of a DOM/HTML parsing
+// library — Workers have no filesystem-style npm deps for that, but
+// HTMLRewriter ships built in and is exactly this shape of problem (pull
+// title + body text, drop script/style). No docx equivalent exists here,
+// which is why /api/extract-file (Python's python-docx) only lives in
+// cowrite_server.py — the public deployment only supports docx via a
+// graceful "unsupported" error from this Worker (see index.html's
+// addCowriteFiles, which surfaces whatever error this 404 or explicit
+// error response carries).
+async function fetchLinkPreview(url) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error("Only http/https links are supported");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("Only http/https links are supported");
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), LINK_FETCH_TIMEOUT_MS);
+  let resp;
+  try {
+    resp = await fetch(url, {
+      signal: controller.signal,
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; CowriteBot/1.0)" },
+    });
+  } catch (err) {
+    if (err.name === "AbortError") throw new Error("Request timed out");
+    throw new Error(`Fetch failed: ${err.message}`);
+  } finally {
+    clearTimeout(timer);
+  }
+  if (!resp.ok) throw new Error(`Page returned ${resp.status} (may require login or be blocked)`);
+  const contentType = resp.headers.get("content-type") || "";
+  if (!contentType.includes("text/html")) throw new Error(`Unsupported content type: ${contentType || "unknown"}`);
+
+  let title = "";
+  const textParts = [];
+  const rewriter = new HTMLRewriter()
+    .on("title", { text(t) { title += t.text; } })
+    .on("script, style, noscript", { element(el) { el.remove(); } })
+    .on("body *", {
+      text(t) {
+        const s = t.text.trim();
+        if (s) textParts.push(s);
+      },
+    });
+  await rewriter.transform(resp).text();
+
+  return {
+    url,
+    title: title.trim().slice(0, 200),
+    domain: parsed.hostname.replace(/^www\./, ""),
+    text: textParts.join(" ").replace(/\s+/g, " ").slice(0, LINK_TEXT_MAX_CHARS),
+  };
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -293,6 +355,25 @@ export default {
         const result = await analyzeContentType(contentType, emails, env.ANTHROPIC_API_KEY);
         result.sample_count = emails.length;
         return jsonResponse(result, cors);
+      }
+
+      if (url.pathname === "/api/extract-file" && request.method === "POST") {
+        return jsonResponse(
+          { error: ".docx text extraction isn't available on the public deployment — try pasting the text directly." },
+          cors,
+          501
+        );
+      }
+
+      if (url.pathname === "/api/fetch-link" && request.method === "POST") {
+        const body = await request.json();
+        const target = (body.url || "").trim();
+        if (!target) return jsonResponse({ error: "url is required" }, cors, 400);
+        try {
+          return jsonResponse(await fetchLinkPreview(target), cors);
+        } catch (err) {
+          return jsonResponse({ error: String((err && err.message) || err) }, cors, 502);
+        }
       }
 
       if (url.pathname === "/api/chat" && request.method === "POST") {
