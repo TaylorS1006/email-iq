@@ -175,6 +175,51 @@ def _build_record(email: dict, stats: dict) -> EmailRecord:
     )
 
 
+def fetch_lists(*, token: Optional[str] = None) -> list[dict]:
+    """
+    Return HubSpot contact lists as [{"id": ..., "name": ...}, ...], sorted by name.
+
+    Uses the CRM Lists v3 search endpoint (POST /crm/v3/lists/search with an
+    empty query, which matches every list regardless of object type). This
+    requires the private app token to have the `crm.lists.read` scope —
+    HubSpot introduced this as a separate scope from the older v1 Contact
+    Lists API, so an existing token that only has contact/email scopes will
+    likely need it added under Settings → Integrations → Private Apps →
+    (this app) → Scopes, followed by regenerating the token.
+
+    Raises PermissionError with HubSpot's raw response text if the token
+    lacks the scope, so the caller can surface an actionable message.
+    """
+    token = token or os.environ["HUBSPOT_ACCESS_TOKEN"]
+    session = _session(token)
+
+    lists: list[dict] = []
+    offset = 0
+    while True:
+        resp = session.post(
+            f"{_BASE}/crm/v3/lists/search",
+            json={"query": "", "offset": offset, "count": 250},
+        )
+        if resp.status_code == 403:
+            raise PermissionError(
+                "HubSpot returned 403 fetching lists — the private app token "
+                "likely needs the 'crm.lists.read' scope added, then must be "
+                f"regenerated. Raw response: {resp.text}"
+            )
+        resp.raise_for_status()
+        body = resp.json()
+
+        page = body.get("lists", [])
+        for lst in page:
+            lists.append({"id": str(lst.get("listId")), "name": lst.get("name", "")})
+
+        if not page or not body.get("hasMore"):
+            break
+        offset += len(page)
+
+    return sorted(lists, key=lambda l: l["name"].lower())
+
+
 def fetch_emails(
     *,
     token: Optional[str] = None,

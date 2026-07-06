@@ -224,6 +224,347 @@ def _build_summary_rows(
     return rows
 
 
+COWRITE_NAV = '<button class="nav-item" onclick="switchView(\'cowrite\', this); initCowriteView();">Co-write</button>'
+
+COWRITE_VIEW = """
+  <!-- Co-write -->
+  <div id="view-cowrite" class="view">
+    <p class="view-title">Co-write</p>
+
+    <div id="cowrite-setup">
+      <div class="cowrite-mode-toggle">
+        <button type="button" class="cowrite-mode-btn active" id="cowrite-mode-write" onclick="setCowriteMode('write')">Write new</button>
+        <button type="button" class="cowrite-mode-btn" id="cowrite-mode-review" onclick="setCowriteMode('review')">Review existing</button>
+      </div>
+
+      <div class="cowrite-form-card">
+        <div class="filters">
+          <div class="filter-group">
+            <label>Content Type</label>
+            <select id="cowrite-type-picker">
+              <option value="">— select type —</option>
+            </select>
+          </div>
+          <div class="filter-group">
+            <label>Audience List</label>
+            <select id="cowrite-audience-picker">
+              <option value="">Loading lists…</option>
+            </select>
+          </div>
+        </div>
+
+        <div id="cowrite-write-fields">
+          <label class="cowrite-sentence-label">This is a <strong>[content type]</strong> email going to <strong>[audience list]</strong> about:</label>
+          <textarea id="cowrite-topic" class="cowrite-textarea" rows="3" placeholder="e.g. our new provider credentialing turnaround-time guarantee"></textarea>
+        </div>
+
+        <div id="cowrite-review-fields" style="display:none">
+          <div class="filter-group" style="width:100%">
+            <label>Subject Line</label>
+            <input type="text" id="cowrite-review-subject" placeholder="Paste the subject line here">
+          </div>
+          <div class="filter-group" style="width:100%; margin-top:12px">
+            <label>Email Body — Paste your email copy here</label>
+            <textarea id="cowrite-review-body" class="cowrite-textarea" rows="8" placeholder="Paste your email copy here"></textarea>
+          </div>
+        </div>
+
+        <div id="cowrite-setup-error" class="cowrite-error" style="display:none"></div>
+        <button type="button" class="cowrite-start-btn" id="cowrite-start-btn" onclick="startCowriteSession()">Start</button>
+      </div>
+    </div>
+
+    <div id="cowrite-session" class="cowrite-session" style="display:none">
+      <div class="cowrite-session-header">
+        <div class="cowrite-session-meta" id="cowrite-session-meta"></div>
+        <div class="cowrite-session-actions">
+          <button type="button" class="cowrite-refresh-btn" id="cowrite-refresh-btn" onclick="refreshCowritePlaybook()">Refresh data</button>
+          <button type="button" class="cowrite-new-btn" onclick="resetCowriteSession()">New session</button>
+        </div>
+      </div>
+      <div class="cowrite-messages" id="cowrite-messages"></div>
+      <div class="cowrite-input-row">
+        <textarea id="cowrite-input" class="cowrite-input" rows="2" placeholder="Ask a follow-up or request a revision…" onkeydown="cowriteInputKeydown(event)"></textarea>
+        <button type="button" class="cowrite-send-btn" id="cowrite-send-btn" onclick="sendCowriteMessage()">Send</button>
+      </div>
+    </div>
+  </div><!-- /cowrite -->
+"""
+
+COWRITE_CSS = """
+  /* ── Co-write ── */
+  .cowrite-mode-toggle { display: flex; gap: 8px; margin-bottom: 20px; }
+  .cowrite-mode-btn { background: white; border: 1px solid var(--color-border); border-radius: 8px; padding: 9px 18px; font-size: 13px; font-weight: 600; color: var(--color-text); cursor: pointer; }
+  .cowrite-mode-btn.active { background: var(--color-primary-hover); border-color: var(--color-primary-hover); color: white; }
+  .cowrite-form-card { background: white; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.07); padding: 24px; max-width: 640px; }
+  .cowrite-sentence-label { display: block; font-size: 14px; color: var(--color-text); margin: 18px 0 8px; }
+  .cowrite-sentence-label strong { color: var(--color-primary-hover); font-weight: 700; }
+  .cowrite-textarea, .cowrite-review-fields input[type=text] {
+    width: 100%; border: 1px solid var(--color-border); border-radius: 8px;
+    padding: 10px 12px; font-size: 13px; font-family: inherit; color: var(--color-text);
+    resize: vertical; box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+  }
+  #cowrite-review-subject { width: 100%; border: 1px solid var(--color-border); border-radius: 8px; padding: 10px 12px; font-size: 13px; font-family: inherit; color: var(--color-text); box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
+  .cowrite-error { color: var(--color-avoid); font-size: 13px; margin-top: 10px; }
+  .cowrite-start-btn, .cowrite-send-btn {
+    background: var(--color-primary-hover); color: white; border: none; border-radius: 8px;
+    padding: 10px 22px; font-size: 14px; font-weight: 600; cursor: pointer; margin-top: 18px;
+  }
+  .cowrite-start-btn:hover, .cowrite-send-btn:hover { background: var(--color-accent); }
+  .cowrite-start-btn:disabled, .cowrite-send-btn:disabled { opacity: 0.6; cursor: default; }
+  .cowrite-refresh-btn, .cowrite-new-btn {
+    background: white; border: 1px solid var(--color-border); border-radius: 8px;
+    padding: 6px 14px; font-size: 12px; font-weight: 600; color: var(--color-text); cursor: pointer;
+  }
+  .cowrite-session-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+  .cowrite-session-meta { font-size: 13px; font-weight: 700; color: var(--color-primary-hover); text-transform: capitalize; }
+  .cowrite-session-actions { display: flex; gap: 8px; }
+  .cowrite-messages { display: flex; flex-direction: column; gap: 14px; margin-bottom: 16px; }
+  .cowrite-msg { max-width: 75%; padding: 12px 16px; border-radius: 14px; font-size: 14px; line-height: 1.55; white-space: pre-wrap; word-wrap: break-word; }
+  .cowrite-msg-user { align-self: flex-end; background: var(--color-primary-hover); color: white; border-bottom-right-radius: 4px; }
+  .cowrite-msg-assistant { align-self: flex-start; background: white; border: 1px solid var(--color-border); color: var(--color-text); border-bottom-left-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+  .cowrite-msg-pending { font-style: italic; color: var(--color-text-secondary); }
+  .cowrite-msg-error { border-color: var(--color-avoid); color: var(--color-avoid); }
+  .cowrite-msg-system { align-self: center; background: var(--color-good-bg); color: var(--color-text); font-size: 13px; text-align: center; max-width: 90%; }
+  .cowrite-input-row { display: flex; gap: 10px; align-items: flex-end; }
+  .cowrite-input { flex: 1; border: 1px solid var(--color-border); border-radius: 8px; padding: 10px 12px; font-size: 13px; font-family: inherit; color: var(--color-text); resize: vertical; }
+  .cowrite-input-row .cowrite-send-btn { margin-top: 0; }
+"""
+
+COWRITE_JS = """
+// ── Co-write ───────────────────────────────────────────────────
+let cowriteMode = 'write';
+let cowriteMessages = [];
+let cowriteSystemPrompt = '';
+let cowriteSessionType = '';
+let cowritePlaybookByType = {};
+let cowriteInitialized = false;
+
+// COWRITE_API_BASE / COWRITE_GATED are emitted just above this block by
+// _render_html — empty base = same-origin local dev server (cowrite_server.py,
+// no gate); non-empty base = the public Cloudflare Worker (passphrase-gated).
+function getCowritePassphrase() {
+  if (!COWRITE_GATED) return null;
+  let pass = localStorage.getItem('cowritePassphrase');
+  if (!pass) {
+    pass = window.prompt('Enter the Co-write access passphrase:') || '';
+    localStorage.setItem('cowritePassphrase', pass);
+  }
+  return pass;
+}
+
+function cowriteFetch(path, opts) {
+  opts = opts || {};
+  opts.headers = Object.assign({}, opts.headers || {});
+  const pass = getCowritePassphrase();
+  if (pass) opts.headers['X-Cowrite-Key'] = pass;
+  return fetch(COWRITE_API_BASE + path, opts).then(r => {
+    if (r.status === 401) {
+      localStorage.removeItem('cowritePassphrase');
+      return Promise.reject({ error: 'Incorrect passphrase. Reload the page and try again.' });
+    }
+    return r;
+  });
+}
+
+// Loads audience lists on first visit to Co-write rather than at page load,
+// so the passphrase prompt only ever appears for people who open this tab.
+function initCowriteView() {
+  if (cowriteInitialized) return;
+  cowriteInitialized = true;
+  cowriteFetch('/api/audience-lists')
+    .then(r => { if (!r.ok) return r.json().then(e => Promise.reject(e)); return r.json(); })
+    .then(lists => {
+      const sel = document.getElementById('cowrite-audience-picker');
+      sel.innerHTML = '<option value="">— select audience —</option>';
+      lists.forEach(l => {
+        const opt = document.createElement('option');
+        opt.value = l.id;
+        opt.textContent = l.name;
+        sel.appendChild(opt);
+      });
+    })
+    .catch(err => {
+      const sel = document.getElementById('cowrite-audience-picker');
+      sel.innerHTML = '<option value="">Unavailable — see console</option>';
+      console.error('Failed to load HubSpot audience lists', err);
+    });
+}
+
+function setCowriteMode(mode) {
+  cowriteMode = mode;
+  document.getElementById('cowrite-mode-write').classList.toggle('active', mode === 'write');
+  document.getElementById('cowrite-mode-review').classList.toggle('active', mode === 'review');
+  document.getElementById('cowrite-write-fields').style.display = mode === 'write' ? '' : 'none';
+  document.getElementById('cowrite-review-fields').style.display = mode === 'review' ? '' : 'none';
+}
+
+function titleCase(s) { return s.replace(/\\b\\w/g, c => c.toUpperCase()); }
+
+function buildCowriteSystemPrompt(mode, typeLabel, playbook) {
+  let dataSection;
+  if (!playbook || playbook.status === 'insufficient_data') {
+    const count = playbook ? playbook.sample_count : 0;
+    dataSection = `No reliable playbook exists yet for ${typeLabel} emails — only ${count} sample(s) sent, below the minimum needed for pattern analysis. Say so plainly if asked about patterns for this type; do not invent patterns.`;
+  } else if (playbook.status === 'error') {
+    dataSection = `The playbook for ${typeLabel} emails failed to generate (${playbook.error || 'unknown error'}). Say so plainly if asked about patterns for this type.`;
+  } else {
+    dataSection = [
+      `Playbook for ${typeLabel} emails (confidence: sample size ${playbook.sample_count} emails):`,
+      `- Subject line patterns: ${playbook.subject_line_patterns}`,
+      `- CTA patterns: ${playbook.cta_patterns}`,
+      `- Timing patterns: ${playbook.timing_patterns}`,
+      `- Top-performing examples: ${(playbook.top_performing_examples || []).join(' | ')}`,
+      `- Sample size / confidence note: ${playbook.sample_size_note}`,
+    ].join('\\n');
+  }
+
+  const shared = `You are an email copywriting assistant for Medallion, a B2B SaaS provider network management platform. ${dataSection}`;
+
+  if (mode === 'write') {
+    return `${shared}\\n\\nDraft email copy based ONLY on the patterns described above. If the person asks for something the playbook doesn't cover, say plainly that the data doesn't speak to that rather than defaulting to generic email best practices — unless they explicitly ask you to use general best practices instead.`;
+  }
+  return `${shared}\\n\\nReview the pasted email copy specifically against the patterns above. Return specific, evidence-backed suggestions as a scorecard with three sections labeled exactly "DO:", "AVOID:", and "CAUTION:" (omit a section if you have nothing evidence-backed to put in it), each with short bullet points citing the specific pattern from the data. Do not rewrite the whole email unless the person explicitly asks for a rewrite.`;
+}
+
+function startCowriteSession() {
+  const typeAnchor = document.getElementById('cowrite-type-picker').value;
+  const audienceSel = document.getElementById('cowrite-audience-picker');
+  const audienceId = audienceSel.value;
+  const audienceName = audienceId ? audienceSel.options[audienceSel.selectedIndex].textContent : '';
+  const errEl = document.getElementById('cowrite-setup-error');
+  errEl.style.display = 'none';
+
+  if (!typeAnchor || !audienceId) {
+    errEl.textContent = 'Pick a content type and an audience list first.';
+    errEl.style.display = '';
+    return;
+  }
+
+  let topic, subject, body;
+  if (cowriteMode === 'write') {
+    topic = document.getElementById('cowrite-topic').value.trim();
+    if (!topic) {
+      errEl.textContent = 'Add a topic before starting.';
+      errEl.style.display = '';
+      return;
+    }
+  } else {
+    subject = document.getElementById('cowrite-review-subject').value.trim();
+    body = document.getElementById('cowrite-review-body').value.trim();
+    if (!subject && !body) {
+      errEl.textContent = 'Paste a subject line or body before starting.';
+      errEl.style.display = '';
+      return;
+    }
+  }
+
+  const contentTypeKey = typeAnchor.replace(/-/g, ' ');
+  const contentTypeLabel = titleCase(contentTypeKey);
+  const playbook = cowritePlaybookByType[contentTypeKey] || PLAYBOOK_FULL[contentTypeKey];
+
+  cowriteSessionType = contentTypeKey;
+  cowriteSystemPrompt = buildCowriteSystemPrompt(cowriteMode, contentTypeLabel, playbook);
+  cowriteMessages = [];
+
+  let firstMessage;
+  if (cowriteMode === 'write') {
+    firstMessage = `This is a ${contentTypeLabel} email going to '${audienceName}' about ${topic}.`;
+  } else {
+    firstMessage = `Review this ${contentTypeLabel} email going to '${audienceName}' against your data and suggest edits:\\nSubject: ${subject}\\nBody: ${body}`;
+  }
+
+  document.getElementById('cowrite-setup').style.display = 'none';
+  document.getElementById('cowrite-session').style.display = '';
+  document.getElementById('cowrite-session-meta').textContent = `${contentTypeLabel} · ${audienceName}`;
+  document.getElementById('cowrite-messages').innerHTML = '';
+
+  sendCowriteTurn(firstMessage);
+}
+
+function renderCowriteBubble(role, text, extraClass) {
+  const el = document.createElement('div');
+  el.className = 'cowrite-msg cowrite-msg-' + role + (extraClass ? ' ' + extraClass : '');
+  el.textContent = text;
+  document.getElementById('cowrite-messages').appendChild(el);
+  el.scrollIntoView({ block: 'end' });
+  return el;
+}
+
+function sendCowriteTurn(userText) {
+  cowriteMessages.push({ role: 'user', content: userText });
+  renderCowriteBubble('user', userText);
+
+  const sendBtn = document.getElementById('cowrite-send-btn');
+  if (sendBtn) sendBtn.disabled = true;
+  const pending = renderCowriteBubble('assistant', 'Thinking…', 'cowrite-msg-pending');
+
+  cowriteFetch('/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ system: cowriteSystemPrompt, messages: cowriteMessages }),
+  })
+    .then(r => { if (!r.ok) return r.json().then(e => Promise.reject(e)); return r.json(); })
+    .then(data => {
+      pending.remove();
+      cowriteMessages.push({ role: 'assistant', content: data.reply });
+      renderCowriteBubble('assistant', data.reply);
+    })
+    .catch(err => {
+      pending.remove();
+      cowriteMessages.pop();
+      renderCowriteBubble('assistant', `⚠ Couldn't reach Claude: ${(err && (err.error || err.message)) || 'unknown error'}. Try sending again.`, 'cowrite-msg-error');
+    })
+    .finally(() => { if (sendBtn) sendBtn.disabled = false; });
+}
+
+function sendCowriteMessage() {
+  const input = document.getElementById('cowrite-input');
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  sendCowriteTurn(text);
+}
+
+function cowriteInputKeydown(evt) {
+  if (evt.key === 'Enter' && !evt.shiftKey) {
+    evt.preventDefault();
+    sendCowriteMessage();
+  }
+}
+
+function refreshCowritePlaybook() {
+  const btn = document.getElementById('cowrite-refresh-btn');
+  const originalLabel = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Refreshing…';
+
+  cowriteFetch('/api/refresh-playbook?content_type=' + encodeURIComponent(cowriteSessionType))
+    .then(r => { if (!r.ok) return r.json().then(e => Promise.reject(e)); return r.json(); })
+    .then(playbook => {
+      cowritePlaybookByType[cowriteSessionType] = playbook;
+      cowriteSystemPrompt = buildCowriteSystemPrompt(cowriteMode, titleCase(cowriteSessionType), playbook);
+      renderCowriteBubble('assistant', '✓ Playbook data refreshed from live Analyzer results — future replies in this session will use the updated patterns.', 'cowrite-msg-system');
+    })
+    .catch(err => {
+      renderCowriteBubble('assistant', `⚠ Refresh failed: ${(err && (err.error || err.message)) || 'unknown error'}`, 'cowrite-msg-error');
+    })
+    .finally(() => {
+      btn.disabled = false;
+      btn.textContent = originalLabel;
+    });
+}
+
+function resetCowriteSession() {
+  cowriteMessages = [];
+  cowriteSystemPrompt = '';
+  document.getElementById('cowrite-session').style.display = 'none';
+  document.getElementById('cowrite-setup').style.display = '';
+  document.getElementById('cowrite-setup-error').style.display = 'none';
+}
+"""
+
+
 def _render_html(
     all_emails: list[EmailRecord],
     rows: list[dict],
@@ -234,8 +575,33 @@ def _render_html(
     generated_at: datetime,
     pipeline_data: Optional[dict] = None,
     pipeline_start_date: str = PIPELINE_START_DATE,
+    enable_cowrite: bool = False,
+    cowrite_api_base: str = "",
 ) -> str:
     now_str = generated_at.strftime("%B %d, %Y at %I:%M %p UTC")
+
+    # Co-write hits a live backend (Claude + HubSpot Lists) on every message,
+    # so it only ships in a build where that backend is reachable:
+    #   - local dev (cowrite_server.py): cowrite_api_base="" (same-origin,
+    #     relative /api/... calls, no passphrase gate — see COWRITE_GATED)
+    #   - the published index.html: cowrite_api_base=<Cloudflare Worker URL>,
+    #     gated by a shared passphrase since that page is fully public
+    # See COWRITE_NAV, COWRITE_VIEW, COWRITE_CSS, COWRITE_JS below.
+    playbook_full_json = json.dumps(playbook)
+    if enable_cowrite:
+        cowrite_nav_item = COWRITE_NAV
+        cowrite_view_html = COWRITE_VIEW
+        cowrite_css = COWRITE_CSS
+        cowrite_config_js = (
+            f"const COWRITE_API_BASE = {json.dumps(cowrite_api_base)};\n"
+            f"const COWRITE_GATED = {json.dumps(bool(cowrite_api_base))};\n"
+        )
+        cowrite_js = cowrite_config_js + COWRITE_JS
+    else:
+        cowrite_nav_item = ""
+        cowrite_view_html = ""
+        cowrite_css = ""
+        cowrite_js = ""
 
     # Embed all emails as JSON for client-side filtering
     emails_json = _emails_to_json(all_emails)
@@ -532,6 +898,7 @@ def _render_html(
   .status-dot {{ display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }}
   .status-dot.green {{ background: var(--color-good); }}
   .status-dot.red {{ background: var(--color-avoid); }}
+  {cowrite_css}
 
   @media (max-width: 900px) {{
     .sidebar {{ width: 180px; min-width: 180px; }}
@@ -555,7 +922,7 @@ def _render_html(
     <button class="nav-item active" onclick="switchView('dashboard', this)">Dashboard</button>
     <button class="nav-item" onclick="switchView('analyzer', this)">Analyzer</button>
     <button class="nav-item" onclick="switchView('pipeline', this)">Pipeline</button>
-    <button class="nav-item" onclick="switchView('cowrite', this)">Co-write</button>
+    {cowrite_nav_item}
     <button class="nav-item" onclick="switchView('settings', this)">Settings</button>
   </nav>
   <div class="sidebar-footer">Updated {now_str}</div>
@@ -691,14 +1058,7 @@ def _render_html(
     </div>
   </div><!-- /pipeline -->
 
-  <!-- Co-write -->
-  <div id="view-cowrite" class="view">
-    <div class="placeholder-card">
-      <div class="placeholder-badge">Coming Soon</div>
-      <h2>Co-write</h2>
-      <p>Brief-to-draft email writer powered by Claude. Paste a campaign brief and get a ready-to-send email draft in seconds, tailored to your content type and audience.</p>
-    </div>
-  </div><!-- /cowrite -->
+  {cowrite_view_html}
 
   <!-- Settings -->
   <div id="view-settings" class="view">
@@ -763,6 +1123,7 @@ def _render_html(
 <script>
 const ALL_EMAILS = {emails_json};
 const PLAYBOOK = {playbook_data_json};
+const PLAYBOOK_FULL = {playbook_full_json};
 const AI_SUMMARIES = {json.dumps(ai_summaries)};
 const PIPELINE_DATA = {pipeline_data_json};
 
@@ -787,11 +1148,12 @@ function switchView(name, btn) {{
 const typeSet = new Set(ALL_EMAILS.map(e => e.content_type).filter(t => t && t !== 'unknown'));
 const types = [...typeSet].sort();
 types.forEach(t => {{
-  ['filter-type', 'type-picker'].forEach(id => {{
+  ['filter-type', 'type-picker', 'cowrite-type-picker'].forEach(id => {{
     const opt = document.createElement('option');
     opt.value = t.replace(/ /g, '-');
     opt.textContent = t.replace(/\\b\\w/g, c => c.toUpperCase());
-    document.getElementById(id).appendChild(opt.cloneNode(true));
+    const el = document.getElementById(id);
+    if (el) el.appendChild(opt.cloneNode(true));
   }});
 }});
 
@@ -1210,6 +1572,8 @@ function selectType(anchor) {{
 applyFilters();
 selectType('{first_anchor}');
 document.getElementById('type-picker').value = '{first_anchor}';
+
+{cowrite_js}
 </script>
 </body>
 </html>"""
@@ -1220,6 +1584,9 @@ def generate_report(
     days: int = 365,
     push: bool = True,
     token: Optional[str] = None,
+    enable_cowrite: bool = False,
+    output_filename: str = "index.html",
+    cowrite_api_base: str = "",
 ) -> str:
     print("Fetching current period emails (last 365 days)…")
     current = fetch_emails(days=365, token=token)
@@ -1345,9 +1712,11 @@ def generate_report(
     html = _render_html(
         all_730, rows, playbook, current_groups, prior_groups, ai_summaries, generated_at,
         pipeline_data, PIPELINE_START_DATE,
+        enable_cowrite=enable_cowrite,
+        cowrite_api_base=cowrite_api_base,
     )
 
-    output_path = os.path.join(os.path.dirname(__file__), "index.html")
+    output_path = os.path.join(os.path.dirname(__file__), output_filename)
     with open(output_path, "w") as f:
         f.write(html)
     print(f"\nReport written to {output_path}")
@@ -1360,8 +1729,9 @@ def generate_report(
 
 def _git_push(filepath: str) -> None:
     repo_dir = os.path.dirname(filepath)
+    filename = os.path.basename(filepath)
     try:
-        subprocess.run(["git", "add", "index.html"], cwd=repo_dir, check=True)
+        subprocess.run(["git", "add", filename], cwd=repo_dir, check=True)
         subprocess.run(
             ["git", "commit", "-m", f"Update report {datetime.now().strftime('%Y-%m-%d %H:%M')}"],
             cwd=repo_dir,
@@ -1374,4 +1744,12 @@ def _git_push(filepath: str) -> None:
 
 
 if __name__ == "__main__":
-    generate_report()
+    # Co-write ships in the published index.html once COWRITE_WORKER_URL is
+    # set (after the Cloudflare Worker in cloudflare-worker/ is deployed) —
+    # see cloudflare-worker/README.md. Until then this is a no-op and the
+    # dashboard renders exactly as it did before Co-write existed.
+    cowrite_worker_url = os.environ.get("COWRITE_WORKER_URL", "")
+    generate_report(
+        enable_cowrite=bool(cowrite_worker_url),
+        cowrite_api_base=cowrite_worker_url,
+    )
