@@ -83,6 +83,29 @@ function corsHeaders(origin) {
   };
 }
 
+// processingType -> human label. MANUAL lists are hand-curated (static);
+// DYNAMIC lists re-evaluate their filter continuously (active/smart);
+// SNAPSHOT lists are a one-time static capture of a dynamic list.
+const LIST_TYPE_LABELS = { MANUAL: "static", DYNAMIC: "active", SNAPSHOT: "static snapshot" };
+
+// HubSpot includes hs_list_size, hs_last_record_added_at, processingType, and
+// updatedAt in the default /crm/v3/lists/search response (no extra per-list
+// call needed) — member count, a recency/"warmth" signal, and static-vs-active
+// type. Any missing/empty field comes back null so callers fall back to
+// name-only rather than guessing.
+function summarizeList(lst) {
+  const extra = lst.additionalProperties || {};
+  const size = extra.hs_list_size;
+  return {
+    id: String(lst.listId),
+    name: lst.name || "",
+    size: size != null ? Number(size) : null,
+    listType: LIST_TYPE_LABELS[lst.processingType] || null,
+    lastRecordAddedAt: extra.hs_last_record_added_at || null,
+    updatedAt: lst.updatedAt || null,
+  };
+}
+
 async function fetchLists(hsToken) {
   const lists = [];
   let offset = 0;
@@ -101,7 +124,7 @@ async function fetchLists(hsToken) {
     if (!resp.ok) throw new Error(`HubSpot lists fetch failed: ${resp.status} ${await resp.text()}`);
     const body = await resp.json();
     const page = body.lists || [];
-    for (const lst of page) lists.push({ id: String(lst.listId), name: lst.name || "" });
+    for (const lst of page) lists.push(summarizeList(lst));
     if (!page.length || !body.hasMore) break;
     offset += page.length;
   }

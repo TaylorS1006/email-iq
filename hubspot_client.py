@@ -175,9 +175,41 @@ def _build_record(email: dict, stats: dict) -> EmailRecord:
     )
 
 
+# processingType -> human label. MANUAL lists are hand-curated (static);
+# DYNAMIC lists re-evaluate their filter continuously (active/smart);
+# SNAPSHOT lists are a one-time static capture of a dynamic list.
+_LIST_TYPE_LABELS = {
+    "MANUAL": "static",
+    "DYNAMIC": "active",
+    "SNAPSHOT": "static snapshot",
+}
+
+
+def _list_summary(lst: dict) -> dict:
+    """
+    Extract the subset of a HubSpot list object useful for Co-write context.
+
+    Keys are camelCase to match cloudflare-worker/src/worker.js's
+    summarizeList() — the same Co-write frontend JS (COWRITE_JS in
+    report.py) consumes this response from both the local Flask dev server
+    and the published Cloudflare Worker, so the two must stay shape-identical.
+    """
+    extra = lst.get("additionalProperties", {}) or {}
+    size = extra.get("hs_list_size")
+    return {
+        "id": str(lst.get("listId")),
+        "name": lst.get("name", ""),
+        "size": int(size) if size is not None else None,
+        "listType": _LIST_TYPE_LABELS.get(lst.get("processingType"), None),
+        "lastRecordAddedAt": extra.get("hs_last_record_added_at"),
+        "updatedAt": lst.get("updatedAt"),
+    }
+
+
 def fetch_lists(*, token: Optional[str] = None) -> list[dict]:
     """
-    Return HubSpot contact lists as [{"id": ..., "name": ...}, ...], sorted by name.
+    Return HubSpot contact lists as [{"id", "name", "size", "list_type",
+    "last_record_added_at", "updated_at"}, ...], sorted by name.
 
     Uses the CRM Lists v3 search endpoint (POST /crm/v3/lists/search with an
     empty query, which matches every list regardless of object type). This
@@ -186,6 +218,12 @@ def fetch_lists(*, token: Optional[str] = None) -> list[dict]:
     Lists API, so an existing token that only has contact/email scopes will
     likely need it added under Settings → Integrations → Private Apps →
     (this app) → Scopes, followed by regenerating the token.
+
+    HubSpot includes hs_list_size, hs_last_record_added_at, processingType,
+    and updatedAt in the default response (no extra per-list call needed) —
+    that's member count, a recency/"warmth" signal, and static-vs-active
+    type. Any field that's missing/empty on a given list comes back None so
+    callers can fall back to name-only rather than guessing.
 
     Raises PermissionError with HubSpot's raw response text if the token
     lacks the scope, so the caller can surface an actionable message.
@@ -211,7 +249,7 @@ def fetch_lists(*, token: Optional[str] = None) -> list[dict]:
 
         page = body.get("lists", [])
         for lst in page:
-            lists.append({"id": str(lst.get("listId")), "name": lst.get("name", "")})
+            lists.append(_list_summary(lst))
 
         if not page or not body.get("hasMore"):
             break

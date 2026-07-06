@@ -310,9 +310,10 @@ COWRITE_VIEW = """
           </div>
           <div class="filter-group">
             <label>Audience List</label>
-            <select id="cowrite-audience-picker">
+            <select id="cowrite-audience-picker" onchange="onCowriteAudienceChange()">
               <option value="">Loading lists…</option>
             </select>
+            <span class="cowrite-audience-meta" id="cowrite-audience-meta"></span>
           </div>
         </div>
 
@@ -363,6 +364,7 @@ COWRITE_CSS = """
   .cowrite-form-card .filters { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: end; }
   .cowrite-form-card .filter-group { width: 100%; }
   .cowrite-form-card .filters select { width: 100%; min-width: 0; }
+  .cowrite-audience-meta { font-size: 12px; color: var(--color-text-secondary); min-height: 16px; }
   .cowrite-sentence-label { display: block; font-size: 14px; color: var(--color-text); margin: 18px 0 8px; }
   .cowrite-sentence-label strong { color: var(--color-primary-hover); font-weight: 700; }
   .cowrite-textarea, .cowrite-review-fields input[type=text] {
@@ -447,6 +449,12 @@ function initCowriteView() {
         const opt = document.createElement('option');
         opt.value = l.id;
         opt.textContent = l.name;
+        // Metadata is best-effort — HubSpot omits fields that are empty for a
+        // given list, so any of these can legitimately be missing.
+        if (l.size != null) opt.dataset.size = l.size;
+        if (l.listType) opt.dataset.listType = l.listType;
+        if (l.lastRecordAddedAt) opt.dataset.lastRecordAddedAt = l.lastRecordAddedAt;
+        if (l.updatedAt) opt.dataset.updatedAt = l.updatedAt;
         sel.appendChild(opt);
       });
     })
@@ -455,6 +463,44 @@ function initCowriteView() {
       sel.innerHTML = '<option value="">Unavailable — see console</option>';
       console.error('Failed to load HubSpot audience lists', err);
     });
+}
+
+// Reads whatever metadata HubSpot gave us for the selected list back off the
+// <option>'s dataset (set in initCowriteView above) rather than re-fetching —
+// the list response already has everything Co-write needs.
+function getSelectedAudienceMeta() {
+  const sel = document.getElementById('cowrite-audience-picker');
+  const opt = sel.options[sel.selectedIndex];
+  if (!opt || !opt.value) return null;
+  return {
+    size: opt.dataset.size ? Number(opt.dataset.size) : null,
+    listType: opt.dataset.listType || null,
+    lastRecordAddedAt: opt.dataset.lastRecordAddedAt || null,
+    updatedAt: opt.dataset.updatedAt || null,
+  };
+}
+
+// Renders "2,340 contacts, active list, last contact added March 2026" from
+// whatever subset of fields is actually present — never invents a number.
+function formatAudienceMeta(meta) {
+  if (!meta) return '';
+  const parts = [];
+  if (meta.size != null) parts.push(`${meta.size.toLocaleString()} contacts`);
+  if (meta.listType) parts.push(`${meta.listType} list`);
+  const recency = meta.lastRecordAddedAt || meta.updatedAt;
+  if (recency) {
+    const d = new Date(recency);
+    if (!isNaN(d)) {
+      const label = meta.lastRecordAddedAt ? 'last contact added' : 'last updated';
+      parts.push(`${label} ${d.toLocaleString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' })}`);
+    }
+  }
+  return parts.join(', ');
+}
+
+function onCowriteAudienceChange() {
+  const metaEl = document.getElementById('cowrite-audience-meta');
+  metaEl.textContent = formatAudienceMeta(getSelectedAudienceMeta());
 }
 
 function setCowriteMode(mode) {
@@ -467,7 +513,7 @@ function setCowriteMode(mode) {
 
 function titleCase(s) { return s.replace(/\\b\\w/g, c => c.toUpperCase()); }
 
-function buildCowriteSystemPrompt(mode, typeLabel, playbook) {
+function buildCowriteSystemPrompt(mode, typeLabel, playbook, audienceName, audienceMeta) {
   let dataSection;
   if (!playbook || playbook.status === 'insufficient_data') {
     const count = playbook ? playbook.sample_count : 0;
@@ -487,7 +533,16 @@ function buildCowriteSystemPrompt(mode, typeLabel, playbook) {
     ].join('\\n');
   }
 
-  const shared = `You are an email copywriting assistant for Medallion, a B2B SaaS provider network management platform. ${dataSection}`;
+  // audienceMeta comes live from the HubSpot list response (see
+  // getSelectedAudienceMeta) — it can be null (fetch failed, or fields
+  // HubSpot didn't return) so this degrades to name-only rather than
+  // guessing at numbers.
+  const metaStr = formatAudienceMeta(audienceMeta);
+  const audienceLine = metaStr
+    ? `Audience: '${audienceName}' (${metaStr}).`
+    : `Audience: '${audienceName}'. Live size/type data for this list wasn't available — proceed without it and do not ask the person for the list size or warmth, since that data genuinely isn't retrievable here.`;
+
+  const shared = `You are an email copywriting assistant for Medallion, a B2B SaaS provider network management platform. ${audienceLine} ${dataSection}`;
 
   if (mode === 'write') {
     return `${shared}\\n\\nDraft email copy based ONLY on the patterns described above. If the person asks for something the playbook doesn't cover, say plainly that the data doesn't speak to that rather than defaulting to generic email best practices — unless they explicitly ask you to use general best practices instead.`;
@@ -500,6 +555,7 @@ function startCowriteSession() {
   const audienceSel = document.getElementById('cowrite-audience-picker');
   const audienceId = audienceSel.value;
   const audienceName = audienceId ? audienceSel.options[audienceSel.selectedIndex].textContent : '';
+  const audienceMeta = getSelectedAudienceMeta();
   const errEl = document.getElementById('cowrite-setup-error');
   errEl.style.display = 'none';
 
@@ -532,7 +588,7 @@ function startCowriteSession() {
   const playbook = cowritePlaybookByType[contentTypeKey] || PLAYBOOK_FULL[contentTypeKey];
 
   cowriteSessionType = contentTypeKey;
-  cowriteSystemPrompt = buildCowriteSystemPrompt(cowriteMode, contentTypeLabel, playbook);
+  cowriteSystemPrompt = buildCowriteSystemPrompt(cowriteMode, contentTypeLabel, playbook, audienceName, audienceMeta);
   cowriteMessages = [];
 
   let firstMessage;
