@@ -239,7 +239,10 @@
   .cowrite-mode-toggle { display: flex; gap: 8px; margin-bottom: 20px; }
   .cowrite-mode-btn { background: white; border: 1px solid var(--color-border); border-radius: 8px; padding: 9px 18px; font-size: 13px; font-weight: 600; color: var(--color-text); cursor: pointer; }
   .cowrite-mode-btn.active { background: var(--color-primary-hover); border-color: var(--color-primary-hover); color: white; }
-  .cowrite-form-card { background: white; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.07); padding: 24px; max-width: 640px; }
+  .cowrite-form-card { background: white; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.07); padding: 24px; max-width: 100%; }
+  .cowrite-form-card .filters { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: end; }
+  .cowrite-form-card .filter-group { width: 100%; }
+  .cowrite-form-card .filters select { width: 100%; min-width: 0; }
   .cowrite-sentence-label { display: block; font-size: 14px; color: var(--color-text); margin: 18px 0 8px; }
   .cowrite-sentence-label strong { color: var(--color-primary-hover); font-weight: 700; }
   .cowrite-textarea, .cowrite-review-fields input[type=text] {

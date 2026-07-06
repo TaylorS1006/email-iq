@@ -11,7 +11,7 @@ import os
 import subprocess
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import anthropic
@@ -53,6 +53,15 @@ AI_BENCHMARKS = {
 # Pipeline Association covers every campaign sent on/after this fixed date —
 # not a rolling window. Bump manually if the program's start date changes.
 PIPELINE_START_DATE = "2026-01-01"
+
+# Fixed calendar quarters with their own pre-generated AI summary, so the
+# dashboard's date picker can show a summary that actually matches the
+# selected range instead of always falling back to the trailing-365-day
+# "overall" summary. Add more tuples here as new quarters close out.
+QUARTER_DEFINITIONS = [
+    ("q1_2026", "2026-01-01", "2026-03-31"),
+    ("q2_2026", "2026-04-01", "2026-06-30"),
+]
 
 
 def _generate_ai_summary(label: str, metrics: dict, prior: Optional[dict]) -> dict:
@@ -209,6 +218,60 @@ def _top_emails(emails: list[EmailRecord], n: int = 5) -> list[EmailRecord]:
     return sorted(valid, key=lambda e: e.open_rate, reverse=True)[:n]
 
 
+_CONFIDENCE_GROUPS = [
+    ("strong", "Strong Signal"),
+    ("moderate", "Moderate Signal"),
+    ("none", "No Signal"),
+]
+
+
+def _render_insight_card(insight: dict) -> str:
+    confidence = insight.get("confidence", "moderate")
+    headline = insight.get("headline", "")
+    key_stat = insight.get("key_stat", "")
+    reasoning = insight.get("reasoning", "")
+    action = insight.get("action", "")
+
+    stat_html = f'<div class="insight-stat">{key_stat}</div>' if key_stat else ""
+
+    if confidence == "strong":
+        extra = f'<p class="insight-action"><strong>Try this next:</strong> {action}</p>' if action else ""
+    elif confidence == "moderate":
+        extra = f"""<details class="insight-reasoning">
+                        <summary>Show reasoning</summary>
+                        <p>{reasoning}</p>
+                    </details>""" if reasoning else ""
+    else:  # none — show the "checked and ruled out" reasoning inline, not collapsed
+        extra = f'<p class="insight-reasoning-inline">{reasoning}</p>' if reasoning else ""
+
+    return f"""
+                <div class="insight-card confidence-{confidence}">
+                    <h3>{headline}</h3>
+                    {stat_html}
+                    {extra}
+                </div>"""
+
+
+def _render_insight_groups(insights: list[dict]) -> str:
+    by_confidence: dict[str, list[dict]] = defaultdict(list)
+    for insight in insights:
+        by_confidence[insight.get("confidence", "moderate")].append(insight)
+
+    html = ""
+    for key, label in _CONFIDENCE_GROUPS:
+        group = by_confidence.get(key, [])
+        if not group:
+            continue
+        cards = "".join(_render_insight_card(i) for i in group)
+        html += f"""
+            <div class="insight-group">
+                <h4 class="insight-group-label confidence-{key}">{label}</h4>
+                <div class="insights-grid">{cards}
+                </div>
+            </div>"""
+    return html
+
+
 def _build_summary_rows(
     current_groups: dict[str, list[EmailRecord]],
     prior_groups: dict[str, list[EmailRecord]],
@@ -296,7 +359,10 @@ COWRITE_CSS = """
   .cowrite-mode-toggle { display: flex; gap: 8px; margin-bottom: 20px; }
   .cowrite-mode-btn { background: white; border: 1px solid var(--color-border); border-radius: 8px; padding: 9px 18px; font-size: 13px; font-weight: 600; color: var(--color-text); cursor: pointer; }
   .cowrite-mode-btn.active { background: var(--color-primary-hover); border-color: var(--color-primary-hover); color: white; }
-  .cowrite-form-card { background: white; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.07); padding: 24px; max-width: 640px; }
+  .cowrite-form-card { background: white; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.07); padding: 24px; max-width: 100%; }
+  .cowrite-form-card .filters { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: end; }
+  .cowrite-form-card .filter-group { width: 100%; }
+  .cowrite-form-card .filters select { width: 100%; min-width: 0; }
   .cowrite-sentence-label { display: block; font-size: 14px; color: var(--color-text); margin: 18px 0 8px; }
   .cowrite-sentence-label strong { color: var(--color-primary-hover); font-weight: 700; }
   .cowrite-textarea, .cowrite-review-fields input[type=text] {
@@ -409,13 +475,15 @@ function buildCowriteSystemPrompt(mode, typeLabel, playbook) {
   } else if (playbook.status === 'error') {
     dataSection = `The playbook for ${typeLabel} emails failed to generate (${playbook.error || 'unknown error'}). Say so plainly if asked about patterns for this type.`;
   } else {
+    const insightLines = (playbook.insights || []).map(i =>
+      `- [${(i.confidence || '').toUpperCase()}] ${i.headline} (${i.key_stat}) ${i.reasoning}${i.action ? ' Try this next: ' + i.action : ''}`
+    );
     dataSection = [
       `Playbook for ${typeLabel} emails (confidence: sample size ${playbook.sample_count} emails):`,
-      `- Subject line patterns: ${playbook.subject_line_patterns}`,
-      `- CTA patterns: ${playbook.cta_patterns}`,
-      `- Timing patterns: ${playbook.timing_patterns}`,
+      `- Executive summary: ${playbook.executive_summary}`,
+      ...insightLines,
       `- Top-performing examples: ${(playbook.top_performing_examples || []).join(' | ')}`,
-      `- Sample size / confidence note: ${playbook.sample_size_note}`,
+      `- Data quality note: ${playbook.data_quality_note}`,
     ].join('\\n');
   }
 
@@ -544,7 +612,7 @@ function refreshCowritePlaybook() {
     .then(playbook => {
       cowritePlaybookByType[cowriteSessionType] = playbook;
       cowriteSystemPrompt = buildCowriteSystemPrompt(cowriteMode, titleCase(cowriteSessionType), playbook);
-      renderCowriteBubble('assistant', '✓ Playbook data refreshed from live Analyzer results — future replies in this session will use the updated patterns.', 'cowrite-msg-system');
+      renderCowriteBubble('assistant', '✓ Playbook data refreshed from the latest analysis — future replies in this session will use the updated patterns.', 'cowrite-msg-system');
     })
     .catch(err => {
       renderCowriteBubble('assistant', `⚠ Refresh failed: ${(err && (err.error || err.message)) || 'unknown error'}`, 'cowrite-msg-error');
@@ -619,12 +687,19 @@ def _render_html(
         hidden = '' if first else 'style="display:none"'
         first = False
 
-        if "status" in data:
+        if data.get("status") == "insufficient_data":
             count = data.get("sample_count", 0)
             minimum = data.get("minimum_required", 5)
             playbook_panels += f"""
         <div id="panel-{anchor}" class="playbook-panel" {hidden}>
             <p class="insufficient-note">⚠ Insufficient data ({count} emails, need {minimum}+ for reliable analysis)</p>
+        </div>"""
+            continue
+
+        if data.get("status") == "error":
+            playbook_panels += f"""
+        <div id="panel-{anchor}" class="playbook-panel" {hidden}>
+            <p class="insufficient-note">⚠ Analysis failed for this content type ({len(emails)} emails available) — {data.get('error', 'unknown error')}. Try regenerating the report.</p>
         </div>"""
             continue
 
@@ -640,31 +715,23 @@ def _render_html(
         if not top_emails_html:
             top_emails_html = '<tr><td colspan="4">No emails with 50+ recipients</td></tr>'
 
+        insight_groups_html = _render_insight_groups(data.get("insights", []))
+
         playbook_panels += f"""
         <div id="panel-{anchor}" class="playbook-panel" {hidden}>
-            <div class="insights-grid">
-                <div class="insight-card">
-                    <h3>Subject Line Patterns</h3>
-                    <p>{data['subject_line_patterns']}</p>
-                </div>
-                <div class="insight-card">
-                    <h3>CTA Patterns</h3>
-                    <p>{data['cta_patterns']}</p>
-                </div>
-                <div class="insight-card">
-                    <h3>Timing Patterns</h3>
-                    <p>{data['timing_patterns']}</p>
-                </div>
-                <div class="insight-card">
-                    <h3>Data Note</h3>
-                    <p>{data['sample_size_note']}</p>
-                </div>
-            </div>
             <h3 class="top-label">Top Performing Emails</h3>
             <table class="top-emails">
                 <thead><tr><th>Subject</th><th>Sent</th><th>Open Rate</th><th>Click Rate</th></tr></thead>
                 <tbody>{top_emails_html}</tbody>
             </table>
+            <div class="exec-summary">
+                <span class="exec-summary-label">What this tells us</span>
+                <p>{data['executive_summary']}</p>
+            </div>
+            {insight_groups_html}
+            <div class="data-quality-banner">
+                <strong>Data quality notes:</strong> {data['data_quality_note']}
+            </div>
         </div>"""
 
     playbook_data_json = json.dumps({
@@ -709,7 +776,8 @@ def _render_html(
     --color-avoid: #433F2A;
     --color-positive: #4B6B35;
     --color-good-bg: rgba(123, 116, 91, 0.18);
-    --color-bad-bg: rgba(148, 123, 80, 0.22);
+    --color-ok-bg: rgba(184, 134, 11, 0.25);
+    --color-bad-bg: rgba(179, 58, 44, 0.25);
     --color-neutral-bg: rgba(162, 154, 144, 0.20);
     /* Metric cards — one solid color each, reused wherever a card-specific accent is needed */
     --color-card-1: #BDA49B;  /* Delivered rate */
@@ -830,8 +898,8 @@ def _render_html(
   .type-cell {{ text-transform: capitalize; font-weight: 500; }}
   .pct-pill {{ color: var(--color-text); font-weight: 600; }}
   .pct-pill.good {{ background: var(--color-good-bg); padding: 3px 10px; border-radius: 99px; }}
+  .pct-pill.ok {{ background: var(--color-ok-bg); padding: 3px 10px; border-radius: 99px; font-weight: 500; }}
   .pct-pill.bad {{ background: var(--color-bad-bg); padding: 3px 10px; border-radius: 99px; }}
-  .pct-pill.ok {{ font-weight: 500; }}
 
   /* ── Playbook ── */
   .playbook-header {{ display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }}
@@ -844,14 +912,39 @@ def _render_html(
     font-size: 13px; font-weight: 500; color: var(--color-text); cursor: pointer; min-width: 180px;
   }}
   .playbook-card {{ background: white; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.07); padding: 24px; }}
-  .insights-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px; }}
-  .insight-card {{ background: var(--color-bg); border-radius: 8px; padding: 14px; }}
-  .insight-card h3 {{ font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--color-primary-hover); margin-bottom: 7px; }}
-  .insight-card p {{ font-size: 13px; line-height: 1.65; color: var(--color-text); }}
   .top-label {{ font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--color-primary-hover); margin-bottom: 8px; }}
+  .top-emails {{ margin-bottom: 20px; }}
   .top-emails thead {{ background: var(--color-bg); }}
   .top-emails th, .top-emails td {{ padding: 9px 12px; font-size: 13px; }}
   .insufficient-note {{ color: var(--color-caution); font-size: 14px; padding: 8px 0; }}
+
+  /* Executive summary — distinct from insight cards: bordered/highlighted callout */
+  .exec-summary {{ background: var(--color-good-bg); border-left: 4px solid var(--color-primary-hover); border-radius: 6px; padding: 14px 18px; margin-bottom: 24px; }}
+  .exec-summary-label {{ display: block; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--color-primary-hover); margin-bottom: 6px; }}
+  .exec-summary p {{ font-size: 14px; line-height: 1.65; color: var(--color-text); }}
+
+  /* Insight groups — bucketed by confidence */
+  .insight-group {{ margin-bottom: 22px; }}
+  .insight-group-label {{ display: flex; align-items: center; gap: 7px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--color-primary-hover); margin-bottom: 10px; }}
+  .insight-group-label::before {{ content: ''; width: 8px; height: 8px; border-radius: 50%; display: inline-block; }}
+  .insight-group-label.confidence-strong::before {{ background: var(--color-positive); }}
+  .insight-group-label.confidence-moderate::before {{ background: var(--color-caution); }}
+  .insight-group-label.confidence-none::before {{ background: var(--color-border); }}
+  .insights-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }}
+  .insight-card {{ background: var(--color-bg); border-radius: 8px; padding: 14px; border-left: 3px solid transparent; }}
+  .insight-card.confidence-strong {{ border-left-color: var(--color-positive); }}
+  .insight-card.confidence-moderate {{ border-left-color: var(--color-caution); }}
+  .insight-card.confidence-none {{ border-left-color: var(--color-border); opacity: 0.85; }}
+  .insight-card h3 {{ font-size: 14px; font-weight: 700; line-height: 1.4; color: var(--color-text); margin-bottom: 8px; }}
+  .insight-card p {{ font-size: 13px; line-height: 1.65; color: var(--color-text); }}
+  .insight-stat {{ font-size: 15px; font-weight: 700; line-height: 1.4; color: var(--color-primary-hover); margin-bottom: 8px; }}
+  .insight-action {{ font-size: 13px; line-height: 1.6; color: var(--color-text); }}
+  .insight-reasoning-inline {{ font-size: 13px; line-height: 1.6; color: var(--color-text-secondary); }}
+  .insight-reasoning summary {{ font-size: 12px; font-weight: 600; color: var(--color-primary-hover); cursor: pointer; }}
+  .insight-reasoning p {{ font-size: 13px; line-height: 1.6; color: var(--color-text-secondary); margin-top: 8px; }}
+
+  /* Data quality — single persistent banner, not mixed in with findings */
+  .data-quality-banner {{ background: var(--color-ok-bg); border-radius: 6px; padding: 12px 18px; margin-top: 4px; font-size: 13px; line-height: 1.6; color: var(--color-text); }}
 
   /* ── AI Summary ── */
   .ai-summary-card {{ background: var(--color-bg); border: 1px solid var(--color-border); border-radius: 12px; padding: 20px 24px; margin-bottom: 28px; }}
@@ -920,7 +1013,7 @@ def _render_html(
   </div>
   <nav class="sidebar-nav">
     <button class="nav-item active" onclick="switchView('dashboard', this)">Dashboard</button>
-    <button class="nav-item" onclick="switchView('analyzer', this)">Analyzer</button>
+    <button class="nav-item" onclick="switchView('playbook', this)">Playbook</button>
     <button class="nav-item" onclick="switchView('pipeline', this)">Pipeline</button>
     {cowrite_nav_item}
     <button class="nav-item" onclick="switchView('settings', this)">Settings</button>
@@ -1015,8 +1108,8 @@ def _render_html(
     </div>
   </div><!-- /dashboard -->
 
-  <!-- Analyzer -->
-  <div id="view-analyzer" class="view">
+  <!-- Playbook -->
+  <div id="view-playbook" class="view">
     <div class="playbook-header">
       <h2 id="playbook-title">{first_title} <span class="sample-count" id="playbook-count"></span></h2>
       <select class="select-styled" id="type-picker" onchange="selectType(this.value)">
@@ -1026,7 +1119,7 @@ def _render_html(
     <div class="playbook-card">
       {playbook_panels}
     </div>
-  </div><!-- /analyzer -->
+  </div><!-- /playbook -->
 
   <!-- Pipeline -->
   <div id="view-pipeline" class="view">
@@ -1125,9 +1218,10 @@ const ALL_EMAILS = {emails_json};
 const PLAYBOOK = {playbook_data_json};
 const PLAYBOOK_FULL = {playbook_full_json};
 const AI_SUMMARIES = {json.dumps(ai_summaries)};
+const AI_QUARTERS = {json.dumps(QUARTER_DEFINITIONS)};
 const PIPELINE_DATA = {pipeline_data_json};
 
-// No chart components exist in this dashboard yet (Dashboard/Analyzer use
+// No chart components exist in this dashboard yet (Dashboard/Playbook use
 // tables, not canvas/SVG). This is the palette's specified 5-color sequence
 // for whenever one is built, so new charts pick it up instead of library
 // defaults.
@@ -1491,7 +1585,7 @@ function applyFilters() {{
   setCard('val-unsub','delta-unsub', c.unsub_rate, p?.unsub_rate??null, true);
   setCard('val-bounce','delta-bounce', c.bounce_rate, p?.bounce_rate??null, true);
 
-  updateAiSummary(type, campaign);
+  updateAiSummary(type, campaign, from, to);
 
   // Update summary table
   const byType = {{}};
@@ -1511,7 +1605,7 @@ function applyFilters() {{
       const orCls = a.open_rate >= 0.385 ? 'good' : a.open_rate >= 0.2975 ? 'ok' : 'bad';
       const crCls = a.click_rate >= 0.033 ? 'good' : a.click_rate >= 0.0255 ? 'ok' : 'bad';
       const ctCls = a.ctor >= 0.11 ? 'good' : a.ctor >= 0.085 ? 'ok' : 'bad';
-      tbody.innerHTML += `<tr class="data-row" data-target="${{anchor}}" onclick="selectType('${{anchor}}'); switchView('analyzer', document.querySelector('.nav-item:nth-child(2)'))">
+      tbody.innerHTML += `<tr class="data-row" data-target="${{anchor}}" onclick="selectType('${{anchor}}'); switchView('playbook', document.querySelector('.nav-item:nth-child(2)'))">
         <td class="type-cell">${{ct}}</td>
         <td>${{a.count}}</td>
         <td>${{a.sent.toLocaleString()}}</td>
@@ -1523,8 +1617,8 @@ function applyFilters() {{
   tbody.innerHTML += `<tr class="benchmark-row"><td colspan="3">B2B SaaS benchmark</td><td>35%</td><td>3%</td><td>10%</td></tr>`;
 }}
 
-function updateAiSummary(typeFilter, campaignFilter) {{
-  // Campaign takes priority, then content type, then overall
+function updateAiSummary(typeFilter, campaignFilter, from, to) {{
+  // Campaign takes priority, then content type, then a matching quarter, then overall
   let key, note = '';
   if (campaignFilter) {{
     key = 'campaign::' + campaignFilter;
@@ -1536,7 +1630,13 @@ function updateAiSummary(typeFilter, campaignFilter) {{
     key = typeFilter.replace(/-/g,' ');
     if (!AI_SUMMARIES[key]) key = 'overall';
   }} else {{
-    key = 'overall';
+    const q = AI_QUARTERS.find(([, qFrom, qTo]) => from === qFrom && to === qTo);
+    if (q && AI_SUMMARIES[q[0]]) {{
+      key = q[0];
+    }} else {{
+      key = 'overall';
+      note = 'Showing the full report period summary — select Jan 1–Mar 31 or Apr 1–Jun 30 for a quarter-specific summary.';
+    }}
   }}
 
   const data = AI_SUMMARIES[key] || {{"summary": "—", "recommendations": []}};
@@ -1616,6 +1716,39 @@ def generate_report(
     except Exception as e:
         print(f"    ✗ {e}")
         ai_summaries["overall"] = {"summary": "", "recommendations": []}
+
+    print("\nGenerating quarterly AI summaries…")
+    for key, q_start, q_end in QUARTER_DEFINITIONS:
+        q_start_dt = datetime.strptime(q_start, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        q_end_dt = datetime.strptime(q_end, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        q_emails = [
+            e for e in all_730
+            if e.content_type and e.send_date and q_start_dt <= e.send_date <= q_end_dt
+        ]
+        if len(q_emails) < 5:
+            print(f"  [{key}] skipped ({len(q_emails)} emails, need 5+)")
+            continue
+
+        # Prior period = equal-length window immediately preceding the
+        # quarter, matching the JS priorRange() logic used for filter deltas.
+        span_days = (q_end_dt - q_start_dt).days + 1
+        prior_end_dt = q_start_dt - timedelta(days=1)
+        prior_start_dt = prior_end_dt - timedelta(days=span_days - 1)
+        prior_emails = [
+            e for e in all_730
+            if e.content_type and e.send_date and prior_start_dt <= e.send_date <= prior_end_dt
+        ]
+
+        print(f"  [{key}]…")
+        try:
+            ai_summaries[key] = _generate_ai_summary(
+                f"{q_start} to {q_end}", _aggregate(q_emails),
+                _aggregate(prior_emails) if prior_emails else None,
+            )
+            print("    ✓")
+        except Exception as e:
+            print(f"    ✗ {e}")
+            ai_summaries[key] = {"summary": "", "recommendations": []}
 
     for ct, emails in sorted(current_groups.items(), key=lambda x: -len(x[1])):
         if ct == "unknown" or len(emails) < 5:

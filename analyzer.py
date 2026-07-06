@@ -19,24 +19,35 @@ load_dotenv()
 
 MIN_SAMPLE_SIZE = 5
 
+_INSIGHT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "headline": {"type": "string"},
+        "confidence": {"type": "string", "enum": ["strong", "moderate", "none"]},
+        "key_stat": {"type": "string"},
+        "reasoning": {"type": "string"},
+        "action": {"type": "string"},
+    },
+    "required": ["headline", "confidence", "key_stat", "reasoning", "action"],
+    "additionalProperties": False,
+}
+
 _PLAYBOOK_SCHEMA = {
     "type": "object",
     "properties": {
-        "subject_line_patterns": {"type": "string"},
-        "cta_patterns": {"type": "string"},
-        "timing_patterns": {"type": "string"},
+        "executive_summary": {"type": "string"},
+        "insights": {"type": "array", "items": _INSIGHT_SCHEMA},
         "top_performing_examples": {
             "type": "array",
             "items": {"type": "string"},
         },
-        "sample_size_note": {"type": "string"},
+        "data_quality_note": {"type": "string"},
     },
     "required": [
-        "subject_line_patterns",
-        "cta_patterns",
-        "timing_patterns",
+        "executive_summary",
+        "insights",
         "top_performing_examples",
-        "sample_size_note",
+        "data_quality_note",
     ],
     "additionalProperties": False,
 }
@@ -63,19 +74,32 @@ def _build_prompt(content_type: str, emails: list[EmailRecord]) -> str:
     lines += [
         "",
         "Based ONLY on the patterns visible in this data, produce a playbook with these fields:",
-        "  subject_line_patterns: What subject line approaches correlate with higher open rates? "
-        "Be specific (e.g. 'questions outperform statements', 'shorter subjects under 50 chars '). "
-        "If the data does not support a clear pattern, say so explicitly.",
-        "  cta_patterns: What call-to-action or content themes appear in high-performing emails? "
-        "If the data is insufficient to determine this, say so explicitly.",
-        "  timing_patterns: What send-day or send-time patterns are visible? "
-        "If the data does not support a clear pattern, say so explicitly.",
+        "  executive_summary: 2-4 sentences synthesizing what the top-performing emails have in "
+        "common and what to do differently next time. This is a takeaway, not a restatement of "
+        "the raw numbers — someone who already saw the table should learn something from this.",
+        "  insights: A list of individual findings, each covering ONE specific pattern (e.g. a "
+        "subject line wording pattern, subject length, a CTA/content theme, a send-day or "
+        "send-time pattern). For each insight, set:",
+        "    - headline: one short, specific sentence stating the finding.",
+        "    - confidence: 'strong' if the pattern is clear and consistent across multiple emails, "
+        "'moderate' if directional but caveated (small sample, one outlier, conflicting signal), "
+        "or 'none' if you checked for a pattern along this dimension and the data does NOT "
+        "support one — say so explicitly rather than omitting the insight.",
+        "    - key_stat: the single most relevant number backing this insight (a rate, a count, "
+        "or a percentage-point gap).",
+        "    - reasoning: 1-3 sentences of supporting detail and caveats.",
+        "    - action: for 'strong' insights, one concrete 'try this next' recommendation. For "
+        "'moderate' or 'none' insights, use an empty string.",
+        "  You MUST include at least one insight for subject line wording, one for subject length, "
+        "and one for send timing — use 'none' confidence for any of these where the data doesn't "
+        "support a conclusion, rather than skipping it. Add further insights for CTA/content "
+        "themes or any other pattern you find.",
         "  top_performing_examples: List 2-3 actual subject lines from the top-performing emails.",
-        "  sample_size_note: Brief note on sample size and any data quality caveats.",
+        "  data_quality_note: One consolidated note covering sample size, audience-size skew, and "
+        "any subject lines repeated across multiple sends/segments — whatever caveats apply here.",
         "",
         "IMPORTANT: Only report patterns actually supported by this data. Do not add generic "
-        "email best-practices that are not evidenced here. If the data is noisy or insufficient "
-        "to support a pattern for a field, say so in that field.",
+        "email best-practices that are not evidenced here.",
         "",
         "Return ONLY valid JSON matching the schema — no markdown fences, no extra keys.",
     ]
@@ -92,7 +116,7 @@ def _analyze_content_type(
 
     response = client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=1024,
+        max_tokens=4096,
         output_config={"format": {"type": "json_schema", "schema": _PLAYBOOK_SCHEMA}},
         messages=[{"role": "user", "content": prompt}],
     )
@@ -177,16 +201,19 @@ def _print_playbook(playbook: dict[str, dict]) -> None:
             continue
 
         print(f"  Sample size: {data.get('sample_count', '?')} emails\n")
-        print(f"  Subject line patterns:")
-        print(f"    {data['subject_line_patterns']}\n")
-        print(f"  CTA patterns:")
-        print(f"    {data['cta_patterns']}\n")
-        print(f"  Timing patterns:")
-        print(f"    {data['timing_patterns']}\n")
+        print(f"  Executive summary:")
+        print(f"    {data['executive_summary']}\n")
+        for insight in data.get("insights", []):
+            print(f"  [{insight['confidence'].upper()}] {insight['headline']}")
+            print(f"    Key stat: {insight['key_stat']}")
+            print(f"    {insight['reasoning']}")
+            if insight.get("action"):
+                print(f"    Try this next: {insight['action']}")
+            print()
         print(f"  Top-performing subject lines:")
         for ex in data.get("top_performing_examples", []):
             print(f"    • {ex}")
-        print(f"\n  Note: {data['sample_size_note']}")
+        print(f"\n  Data quality note: {data['data_quality_note']}")
 
     print(f"\n{'=' * 70}\n")
 
