@@ -18,8 +18,18 @@ from typing import Optional
 import anthropic
 from dotenv import load_dotenv
 
-from analyzer import build_playbook
+from analyzer import build_playbook, build_persona_playbooks
 from hubspot_client import EmailRecord, fetch_emails
+from nurture_data import (
+    KNOWN_NURTURES,
+    NURTURE_OPPORTUNITY_MIN_SIZE,
+    KnownNurture,
+    NurtureSegment,
+    best_insight_for_persona,
+    build_nurture_segments,
+)
+from persona_config import REAL_PERSONAS
+from persona_data import build_persona_data, persona_groups_for
 
 try:
     from pipeline import analyze_campaign_pipeline
@@ -326,6 +336,121 @@ def _render_playbook_panel(panel_id: str, data: dict, emails: list[EmailRecord],
                 <strong>Data quality notes:</strong> {data['data_quality_note']}
             </div>
         </div>"""
+
+
+def _render_nurture_segment_rows(segments: list[NurtureSegment]) -> str:
+    rows = "".join(
+        f"""
+                <tr>
+                    <td>{s.persona}</td>
+                    <td>{s.lifecycle_stage}</td>
+                    <td>{s.count:,}</td>
+                </tr>"""
+        for s in segments
+    )
+    return rows or '<tr><td colspan="3">No segment data available.</td></tr>'
+
+
+def _render_nurture_opportunity_card(segment: NurtureSegment, insight: Optional[dict]) -> str:
+    if insight:
+        stat_html = (
+            f'<div class="insight-stat">{insight["key_stat"]}</div>' if insight.get("key_stat") else ""
+        )
+        angle_html = f"""
+                <p class="nurture-angle-headline">{insight.get('headline', '')}</p>
+                {stat_html}
+                <p class="nurture-angle-source">Based on {insight.get('source_content_type', 'send')} performance for this persona</p>"""
+    else:
+        angle_html = """
+                <p class="insufficient-note">No send-performance signal yet for this persona — start
+                with a general awareness/education angle and iterate once opens/clicks come in.</p>"""
+
+    return f"""
+        <div class="nurture-opportunity-card">
+            <div class="nurture-card-header">
+                <h3>{segment.persona} — {segment.lifecycle_stage}</h3>
+                <span class="pct-pill ok">{segment.count:,} contacts</span>
+            </div>
+            <p class="nurture-card-subtitle">No active nurture coverage</p>
+            <div class="nurture-angle-block">
+                <span class="exec-summary-label">Suggested angle</span>
+                {angle_html}
+            </div>
+            <p class="nurture-suggestion-note">Starting point: a 4–5 email sequence over 3–4 weeks. Validate
+            with a small test send before committing to the full path.</p>
+            <p class="nurture-caveat">⚠ Informed by one-off send performance, not validated nurture data.</p>
+        </div>"""
+
+
+def _render_nurture_asset_card(n: KnownNurture) -> str:
+    return f"""
+        <div class="nurture-asset-card">
+            <div class="nurture-card-header">
+                <h3>{n.name}</h3>
+                <span class="nurture-revive-label">Revive existing asset</span>
+            </div>
+            <p class="nurture-card-subtitle">Currently disabled — built, not net-new</p>
+            <p class="nurture-asset-stats">{n.step_count} steps · {n.email_count} emails already built</p>
+            <p class="nurture-trigger">{n.trigger_description}</p>
+            <p class="nurture-effort-note">Lower effort than a new build — review targeting and content for
+            current relevance, then re-enable.</p>
+        </div>"""
+
+
+def _render_nurture_section(
+    nurture_segments: list[NurtureSegment],
+    persona_playbooks: dict,
+) -> str:
+    active = [n for n in KNOWN_NURTURES if n.status == "active"]
+    disabled = [n for n in KNOWN_NURTURES if n.status == "disabled"]
+
+    if active:
+        active_desc = "; ".join(f"{n.name} ({n.email_count} emails)" for n in active)
+        coverage_text = (
+            f"{len(active)} active nurture{'s' if len(active) != 1 else ''} — {active_desc} — "
+            f"covering onboarding contacts only. All other segments below have no active nurture coverage."
+        )
+    else:
+        coverage_text = "No active nurtures currently running. All segments below have no active nurture coverage."
+
+    opportunity_segments = [s for s in nurture_segments if s.count >= NURTURE_OPPORTUNITY_MIN_SIZE]
+    opportunity_cards = "".join(
+        _render_nurture_opportunity_card(s, best_insight_for_persona(persona_playbooks, s.persona))
+        for s in opportunity_segments
+    ) or '<p class="insufficient-note">No segments meet the minimum size threshold.</p>'
+
+    asset_cards = "".join(_render_nurture_asset_card(n) for n in disabled)
+    asset_section = (
+        f'<p class="section-title">Existing Asset — Lower Effort</p>'
+        f'<div class="nurture-cards-grid">{asset_cards}</div>'
+        if asset_cards else ""
+    )
+
+    segment_rows = _render_nurture_segment_rows(nurture_segments)
+
+    return f"""
+  <!-- Nurture -->
+  <div id="view-nurture" class="view">
+    <p class="view-title">Nurture Opportunities</p>
+
+    <div class="nurture-coverage-banner">
+        <span class="exec-summary-label">Coverage reality</span>
+        <p>{coverage_text}</p>
+    </div>
+
+    <p class="section-title">Audience Segments (Persona × Lifecycle Stage)</p>
+    <div class="summary-card">
+        <table>
+            <thead><tr><th>Persona</th><th>Lifecycle Stage</th><th>Contacts</th></tr></thead>
+            <tbody>{segment_rows}</tbody>
+        </table>
+    </div>
+
+    <p class="section-title">Opportunity Cards</p>
+    <div class="nurture-cards-grid">{opportunity_cards}</div>
+
+    {asset_section}
+  </div><!-- /nurture -->"""
 
 
 def _build_summary_rows(
@@ -1177,6 +1302,7 @@ def _render_html(
     persona_email_groups: Optional[dict[str, dict[str, list[EmailRecord]]]] = None,
     persona_confidence: Optional[dict[str, dict]] = None,
     overall_unclassified_pct: float = 0.0,
+    nurture_segments: Optional[list[NurtureSegment]] = None,
 ) -> str:
     now_str = generated_at.strftime("%B %d, %Y at %I:%M %p UTC")
 
@@ -1236,6 +1362,10 @@ def _render_html(
             playbook_panels += _render_playbook_panel(f"panel-{slug}-{anchor}", data, emails, hidden=True)
             persona_playbook_meta[slug][anchor] = {"title": ct.title(), "count": data.get("sample_count", "")}
 
+    persona_options_html = "".join(
+        f'<option value="{_persona_slug(p)}">{p}</option>' for p in REAL_PERSONAS
+    )
+
     playbook_data_json = json.dumps({
         ct.replace(" ", "-"): {"title": ct.title(), "count": playbook[ct].get("sample_count", "")}
         for ct in all_types if "status" not in playbook[ct]
@@ -1260,6 +1390,8 @@ def _render_html(
     pipeline_data = pipeline_data or {}
     pipeline_data_json = json.dumps(pipeline_data)
     pipeline_campaigns = sorted(pipeline_data.keys())
+
+    nurture_view_html = _render_nurture_section(nurture_segments or [], persona_playbooks)
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -1409,6 +1541,7 @@ def _render_html(
 
   /* ── Playbook ── */
   .playbook-header {{ display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }}
+  .playbook-header-controls {{ display: flex; gap: 8px; }}
   .playbook-header h2 {{ font-size: 17px; font-weight: 600; text-transform: capitalize; color: var(--color-text); }}
   .playbook-header .sample-count {{ font-size: 13px; color: var(--color-text-secondary); font-weight: 400; margin-left: 8px; }}
   .select-styled {{
@@ -1497,6 +1630,26 @@ def _render_html(
   .status-dot {{ display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }}
   .status-dot.green {{ background: var(--color-good); }}
   .status-dot.red {{ background: var(--color-avoid); }}
+
+  /* ── Nurture ── */
+  .nurture-coverage-banner {{ background: var(--color-ok-bg); border-left: 4px solid var(--color-caution); border-radius: 6px; padding: 14px 18px; margin-bottom: 24px; }}
+  .nurture-coverage-banner p {{ font-size: 14px; line-height: 1.65; color: var(--color-text); }}
+  .nurture-cards-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; margin-bottom: 28px; }}
+  .nurture-card-header {{ display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 6px; }}
+  .nurture-card-header h3 {{ font-size: 15px; font-weight: 700; line-height: 1.4; color: var(--color-text); }}
+  .nurture-card-subtitle {{ font-size: 12px; color: var(--color-text-secondary); margin-bottom: 14px; }}
+  .nurture-opportunity-card {{ background: white; border: 1px solid var(--color-border); border-left: 4px solid var(--color-accent); border-radius: 12px; padding: 18px 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.07); }}
+  .nurture-angle-block {{ background: var(--color-bg); border-radius: 8px; padding: 12px 14px; margin-bottom: 12px; }}
+  .nurture-angle-headline {{ font-size: 13px; font-weight: 700; line-height: 1.4; color: var(--color-text); margin-top: 6px; }}
+  .nurture-angle-source {{ font-size: 11px; color: var(--color-text-secondary); margin-top: 6px; }}
+  .nurture-suggestion-note {{ font-size: 12px; line-height: 1.6; color: var(--color-text-secondary); margin-bottom: 8px; }}
+  .nurture-caveat {{ font-size: 11px; color: var(--color-caution); font-weight: 600; }}
+  .nurture-asset-card {{ background: var(--color-ok-bg); border: 1px solid var(--color-caution); border-left: 4px solid var(--color-caution); border-radius: 12px; padding: 18px 20px; }}
+  .nurture-revive-label {{ display: inline-block; background: white; color: var(--color-caution); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; padding: 3px 10px; border-radius: 99px; white-space: nowrap; }}
+  .nurture-asset-stats {{ font-size: 13px; font-weight: 600; color: var(--color-text); margin-bottom: 8px; }}
+  .nurture-trigger {{ font-size: 12px; line-height: 1.6; color: var(--color-text-secondary); margin-bottom: 10px; }}
+  .nurture-effort-note {{ font-size: 12px; line-height: 1.6; color: var(--color-text); font-weight: 500; }}
+
   {cowrite_css}
 
   @media (max-width: 900px) {{
@@ -1505,6 +1658,7 @@ def _render_html(
     .metric-bar {{ grid-template-columns: repeat(3, 1fr); }}
     .insights-grid {{ grid-template-columns: 1fr; }}
     .pipeline-cards {{ grid-template-columns: 1fr 1fr; }}
+    .nurture-cards-grid {{ grid-template-columns: 1fr; }}
     .view {{ padding: 20px 16px; }}
   }}
 </style>
@@ -1521,6 +1675,7 @@ def _render_html(
     <button class="nav-item active" onclick="switchView('dashboard', this)">Dashboard</button>
     <button class="nav-item" onclick="switchView('playbook', this)">Playbook</button>
     <button class="nav-item" onclick="switchView('pipeline', this)">Pipeline</button>
+    <button class="nav-item" onclick="switchView('nurture', this)">Nurture</button>
     {cowrite_nav_item}
     <button class="nav-item" onclick="switchView('settings', this)">Settings</button>
   </nav>
@@ -1618,12 +1773,22 @@ def _render_html(
   <div id="view-playbook" class="view">
     <div class="playbook-header">
       <h2 id="playbook-title">{first_title} <span class="sample-count" id="playbook-count"></span></h2>
-      <select class="select-styled" id="type-picker" onchange="selectType(this.value)">
-        <option value="">— select type —</option>
-      </select>
+      <div class="playbook-header-controls">
+        <select class="select-styled" id="persona-picker" onchange="selectPersona(this.value)">
+          <option value="all">All</option>
+          {persona_options_html}
+        </select>
+        <select class="select-styled" id="type-picker" onchange="selectType(this.value)">
+          <option value="">— select type —</option>
+        </select>
+      </div>
     </div>
+    <div class="insufficient-note" id="persona-confidence-banner" style="display:none"></div>
     <div class="playbook-card">
       {playbook_panels}
+      <div id="panel-persona-empty" class="playbook-panel" style="display:none">
+        <p class="insufficient-note">⚠ No eligible emails for this content type and persona combination.</p>
+      </div>
     </div>
   </div><!-- /playbook -->
 
@@ -1656,6 +1821,8 @@ def _render_html(
       <div class="pipeline-empty">No pipeline data for the selected filters.</div>
     </div>
   </div><!-- /pipeline -->
+
+  {nurture_view_html}
 
   {cowrite_view_html}
 
@@ -1723,6 +1890,9 @@ def _render_html(
 const ALL_EMAILS = {emails_json};
 const PLAYBOOK = {playbook_data_json};
 const PLAYBOOK_FULL = {playbook_full_json};
+const PERSONA_PLAYBOOK_META = {persona_playbook_meta_json};
+const PERSONA_CONFIDENCE = {persona_confidence_json};
+const OVERALL_UNCLASSIFIED_PCT = {json.dumps(overall_unclassified_pct)};
 const AI_SUMMARIES = {json.dumps(ai_summaries)};
 const AI_QUARTERS = {json.dumps(QUARTER_DEFINITIONS)};
 const PIPELINE_DATA = {pipeline_data_json};
@@ -2159,15 +2329,63 @@ function updateAiSummary(typeFilter, campaignFilter, from, to) {{
   document.getElementById('ai-summary-note').textContent = note;
 }}
 
-function selectType(anchor) {{
-  document.querySelectorAll('.playbook-panel').forEach(p => p.style.display = 'none');
-  const panel = document.getElementById('panel-' + anchor);
-  if (panel) panel.style.display = '';
-  const info = PLAYBOOK[anchor];
-  if (info) {{
-    document.getElementById('playbook-title').childNodes[0].textContent = info.title + ' ';
-    document.getElementById('playbook-count').textContent = info.count ? info.count + ' emails' : '';
+let currentPersona = 'all';
+
+function personaPanelId(anchor) {{
+  return currentPersona === 'all' ? 'panel-' + anchor : 'panel-' + currentPersona + '-' + anchor;
+}}
+
+function renderPersonaBanner() {{
+  const banner = document.getElementById('persona-confidence-banner');
+  if (currentPersona === 'all') {{
+    if (OVERALL_UNCLASSIFIED_PCT > 0) {{
+      banner.style.display = '';
+      banner.textContent = `⚠ ${{OVERALL_UNCLASSIFIED_PCT}}% of contacts across analyzed sends could not be classified into a persona (Job Function blank/other, no Job Title match).`;
+    }} else {{
+      banner.style.display = 'none';
+    }}
+    return;
   }}
+  const c = PERSONA_CONFIDENCE[currentPersona];
+  if (c && c.total_contacts > 0) {{
+    banner.style.display = '';
+    banner.textContent = `ℹ ${{c.clean_pct}}% of this segment's contacts came directly from Job Function; ${{c.fallback_pct}}% were reclassified from Job Title (fallback match).`;
+  }} else {{
+    banner.style.display = 'none';
+  }}
+}}
+
+function renderPlaybookPanel(anchor) {{
+  document.querySelectorAll('.playbook-panel').forEach(p => p.style.display = 'none');
+  let panel = document.getElementById(personaPanelId(anchor));
+  if (!panel && currentPersona !== 'all') {{
+    panel = document.getElementById('panel-persona-empty');
+  }}
+  if (panel) panel.style.display = '';
+
+  const typeMeta = PLAYBOOK[anchor];
+  const title = typeMeta ? typeMeta.title : '';
+  let count = '';
+  if (currentPersona === 'all') {{
+    count = typeMeta ? typeMeta.count : '';
+  }} else {{
+    const personaMeta = (PERSONA_PLAYBOOK_META[currentPersona] || {{}})[anchor];
+    count = personaMeta ? personaMeta.count : 0;
+  }}
+  document.getElementById('playbook-title').childNodes[0].textContent = title + ' ';
+  document.getElementById('playbook-count').textContent = (count || count === 0) ? count + ' emails' : '';
+}}
+
+function selectPersona(persona) {{
+  currentPersona = persona;
+  document.getElementById('persona-picker').value = persona;
+  renderPersonaBanner();
+  const anchor = document.getElementById('type-picker').value;
+  if (anchor) renderPlaybookPanel(anchor);
+}}
+
+function selectType(anchor) {{
+  renderPlaybookPanel(anchor);
   document.getElementById('type-picker').value = anchor;
   document.querySelectorAll('.data-row').forEach(r => r.classList.remove('active'));
   const row = document.querySelector(`.data-row[data-target="${{anchor}}"]`);
@@ -2178,6 +2396,8 @@ function selectType(anchor) {{
 applyFilters();
 selectType('{first_anchor}');
 document.getElementById('type-picker').value = '{first_anchor}';
+document.getElementById('persona-picker').value = 'all';
+renderPersonaBanner();
 
 {cowrite_js}
 </script>
@@ -2206,6 +2426,29 @@ def generate_report(
 
     print("Running analyzer…")
     playbook = build_playbook(days=days, token=token)
+
+    print("\nBuilding persona classification data (job_function_1 + jobtitle fallback)…")
+    try:
+        persona_data_result = build_persona_data(current, token=token)
+        persona_email_groups = {
+            persona: persona_groups_for(current_groups, persona_data_result, persona)
+            for persona in REAL_PERSONAS
+        }
+        print("\nRunning per-persona analyzer…")
+        persona_playbooks = build_persona_playbooks(persona_email_groups, token=token)
+    except Exception as e:
+        print(f"  ✗ Persona segmentation failed: {e}")
+        persona_data_result = None
+        persona_email_groups = {}
+        persona_playbooks = {}
+
+    print("\nBuilding nurture coverage data (persona × lifecycle stage segment sizing)…")
+    try:
+        nurture_segments = build_nurture_segments(token=token)
+        print(f"  → {len(nurture_segments)} non-empty segments")
+    except Exception as e:
+        print(f"  ✗ Nurture segment sizing failed: {e}")
+        nurture_segments = []
 
     # Generate AI summaries per content type + overall
     print("\nGenerating AI summaries…")
@@ -2353,6 +2596,11 @@ def generate_report(
         pipeline_data, PIPELINE_START_DATE,
         enable_cowrite=enable_cowrite,
         cowrite_api_base=cowrite_api_base,
+        persona_playbooks=persona_playbooks,
+        persona_email_groups=persona_email_groups,
+        persona_confidence=(persona_data_result.persona_confidence if persona_data_result else {}),
+        overall_unclassified_pct=(persona_data_result.overall_unclassified_pct if persona_data_result else 0.0),
+        nurture_segments=nurture_segments,
     )
 
     output_path = os.path.join(os.path.dirname(__file__), output_filename)

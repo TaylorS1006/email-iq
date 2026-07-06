@@ -13,6 +13,7 @@ Tunable classification data lives in persona_config.py, not here.
 """
 
 import dataclasses
+import re
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -20,6 +21,15 @@ from hubspot_client import EmailRecord, fetch_contacts_by_email, fetch_event_rec
 from persona_config import JOBTITLE_PERSONA_KEYWORDS, REAL_PERSONAS, UNCLASSIFIED
 
 _REAL_PERSONA_SET = set(REAL_PERSONAS)
+
+# Word-boundary regex per persona, built once from JOBTITLE_PERSONA_KEYWORDS.
+# Plain substring matching would let short acronyms like "cto"/"coo" false-
+# positive inside unrelated words (e.g. "cto" inside "director") — \b avoids
+# that while still matching multi-word phrases like "chief financial".
+_KEYWORD_PATTERNS: dict[str, re.Pattern] = {
+    persona: re.compile(r"\b(?:" + "|".join(re.escape(kw) for kw in keywords) + r")\b")
+    for persona, keywords in JOBTITLE_PERSONA_KEYWORDS.items()
+}
 
 
 def _rate(num: int, den: int) -> float:
@@ -57,8 +67,8 @@ def classify_contact(job_function_1: Optional[str], jobtitle: Optional[str]) -> 
     # job_function_1 missing or OTHER_PROVIDER_BLANK — try the jobtitle fallback.
     if jobtitle:
         lowered = jobtitle.lower()
-        for persona, keywords in JOBTITLE_PERSONA_KEYWORDS.items():
-            if any(kw in lowered for kw in keywords):
+        for persona, pattern in _KEYWORD_PATTERNS.items():
+            if pattern.search(lowered):
                 return persona, "jobtitle_fallback"
 
     return UNCLASSIFIED, "unclassified"

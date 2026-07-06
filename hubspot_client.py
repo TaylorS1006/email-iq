@@ -339,6 +339,49 @@ def fetch_contacts_by_email(
     return results
 
 
+def fetch_property_options(
+    object_type: str,
+    property_name: str,
+    *,
+    token: Optional[str] = None,
+) -> dict[str, str]:
+    """
+    value -> label map for an enumeration contact property, via
+    GET /crm/v3/properties/{object_type}/{property_name}. Used for
+    lifecyclestage since its enum values are portal-specific numeric IDs for
+    custom stages (not stable across HubSpot accounts) — never hardcode them.
+    """
+    token = token or os.environ["HUBSPOT_ACCESS_TOKEN"]
+    session = _session(token)
+    resp = session.get(f"{_BASE}/crm/v3/properties/{object_type}/{property_name}")
+    resp.raise_for_status()
+    return {opt["value"]: opt["label"] for opt in resp.json().get("options", [])}
+
+
+def fetch_contact_count(
+    *,
+    token: Optional[str] = None,
+    filters: list[dict],
+) -> int:
+    """
+    Count of contacts matching an ANDed list of filters (e.g. job_function_1
+    EQ x AND lifecyclestage EQ y), via the CRM search API's `total` field.
+    limit=1 keeps the payload small — we only want the count, not records.
+    """
+    token = token or os.environ["HUBSPOT_ACCESS_TOKEN"]
+    session = _session(token)
+    resp = session.post(
+        f"{_BASE}/crm/v3/objects/contacts/search",
+        json={
+            "filterGroups": [{"filters": filters}],
+            "properties": ["hs_object_id"],
+            "limit": 1,
+        },
+    )
+    resp.raise_for_status()
+    return resp.json().get("total", 0)
+
+
 def fetch_emails(
     *,
     token: Optional[str] = None,
