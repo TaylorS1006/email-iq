@@ -18,7 +18,12 @@ from typing import Optional
 import anthropic
 from dotenv import load_dotenv
 
-from analyzer import build_playbook, build_persona_playbooks
+from analyzer import (
+    build_all_personas_overview_playbook,
+    build_persona_overview_playbooks,
+    build_persona_playbooks,
+    build_playbook,
+)
 from hubspot_client import EmailRecord, fetch_emails
 from nurture_data import (
     KNOWN_NURTURES,
@@ -283,13 +288,26 @@ def _render_insight_groups(insights: list[dict]) -> str:
     return html
 
 
-def _render_playbook_panel(panel_id: str, data: dict, emails: list[EmailRecord], *, hidden: bool) -> str:
+def _render_playbook_panel(
+    panel_id: str,
+    data: dict,
+    emails: list[EmailRecord],
+    *,
+    hidden: bool,
+    show_content_type: bool = False,
+) -> str:
     """
     Render one playbook panel's inner HTML — shared by the unsegmented "All"
-    view and every persona-scoped variant, so insufficient_data/error/full
+    view, every persona-scoped (persona, content_type) variant, and the
+    persona-overview ("By persona") variant, so insufficient_data/error/full
     states only need to be handled in one place.
+
+    show_content_type adds a Content Type column to the Top Performing
+    Emails table — used by the By-persona view, where a segment's top
+    emails can come from different content types and that context matters.
     """
     style = ' style="display:none"' if hidden else ""
+    extra_cols = 1 if show_content_type else 0
 
     if data.get("status") == "insufficient_data":
         count = data.get("sample_count", 0)
@@ -302,29 +320,32 @@ def _render_playbook_panel(panel_id: str, data: dict, emails: list[EmailRecord],
     if data.get("status") == "error":
         return f"""
         <div id="{panel_id}" class="playbook-panel"{style}>
-            <p class="insufficient-note">⚠ Analysis failed for this content type ({len(emails)} emails available) — {data.get('error', 'unknown error')}. Try regenerating the report.</p>
+            <p class="insufficient-note">⚠ Analysis failed ({len(emails)} emails available) — {data.get('error', 'unknown error')}. Try regenerating the report.</p>
         </div>"""
 
     top = _top_emails(emails)
     top_emails_html = ""
     for e in top:
+        type_cell = f"<td>{(e.content_type or 'unknown').title()}</td>" if show_content_type else ""
         top_emails_html += f"""
                 <tr>
                     <td>{e.subject}</td>
+                    {type_cell}
                     <td>{e.sent:,}</td>
                     <td><span class="pct-pill {_delta_class(e.open_rate, BENCHMARKS['open_rate'])}">{_pct(e.open_rate)}</span></td>
                     <td><span class="pct-pill {_delta_class(e.click_rate, BENCHMARKS['click_rate'])}">{_pct(e.click_rate)}</span></td>
                 </tr>"""
     if not top_emails_html:
-        top_emails_html = '<tr><td colspan="4">No emails with 50+ recipients</td></tr>'
+        top_emails_html = f'<tr><td colspan="{3 + extra_cols}">No emails with 50+ recipients</td></tr>'
 
+    type_header = "<th>Content Type</th>" if show_content_type else ""
     insight_groups_html = _render_insight_groups(data.get("insights", []))
 
     return f"""
         <div id="{panel_id}" class="playbook-panel"{style}>
             <h3 class="top-label">Top Performing Emails</h3>
             <table class="top-emails">
-                <thead><tr><th>Subject</th><th>Sent</th><th>Open Rate</th><th>Click Rate</th></tr></thead>
+                <thead><tr><th>Subject</th>{type_header}<th>Sent</th><th>Open Rate</th><th>Click Rate</th></tr></thead>
                 <tbody>{top_emails_html}</tbody>
             </table>
             <div class="exec-summary">
@@ -1303,6 +1324,8 @@ def _render_html(
     persona_confidence: Optional[dict[str, dict]] = None,
     overall_unclassified_pct: float = 0.0,
     persona_data_error: Optional[str] = None,
+    persona_overview_playbooks: Optional[dict[str, dict]] = None,
+    all_personas_overview_playbook: Optional[dict] = None,
     nurture_segments: Optional[list[NurtureSegment]] = None,
 ) -> str:
     now_str = generated_at.strftime("%B %d, %Y at %I:%M %p UTC")
@@ -1377,6 +1400,43 @@ def _render_html(
     })
     first_anchor = all_types[0].replace(" ", "-") if all_types else ""
     first_title = all_types[0].title() if all_types else ""
+
+    # Build "By persona" panels — one per persona plus "All", each analyzed
+    # across ALL content types at once (see analyzer.build_persona_overview_playbooks).
+    # Separate from the (persona, content_type) cells above: those stay
+    # nested inside the "By content type" view unchanged.
+    persona_overview_playbooks = persona_overview_playbooks or {}
+    all_personas_overview_playbook = all_personas_overview_playbook or {
+        "status": "insufficient_data", "sample_count": 0, "minimum_required": 5,
+    }
+    # Same scope build_all_personas_overview_playbook was analyzed against
+    # (current window, content_type set) — current_groups also has an
+    # "unknown" bucket that must stay excluded here for the two to match.
+    all_current_typed_emails = [e for ct, group in current_groups.items() if ct != "unknown" for e in group]
+    persona_overview_panels = _render_playbook_panel(
+        "panel-overview-all",
+        all_personas_overview_playbook,
+        all_current_typed_emails,
+        hidden=False,
+        show_content_type=True,
+    )
+    persona_overview_meta: dict[str, dict] = {
+        "all": {"title": "All Personas", "count": all_personas_overview_playbook.get("sample_count", "")}
+    }
+    for persona, data in persona_overview_playbooks.items():
+        slug = _persona_slug(persona)
+        emails = [] if "status" in data else [
+            e for group in persona_email_groups.get(persona, {}).values() for e in group
+        ]
+        persona_overview_panels += _render_playbook_panel(
+            f"panel-overview-{slug}", data, emails, hidden=True, show_content_type=True,
+        )
+        persona_overview_meta[slug] = {"title": persona, "count": data.get("sample_count", "")}
+
+    persona_overview_picker_options = "".join(
+        f'<option value="{_persona_slug(p)}">{p}</option>' for p in REAL_PERSONAS
+    )
+    persona_overview_meta_json = json.dumps(persona_overview_meta)
 
     # Card color palette (one per metric)
     card_colors = [
@@ -1541,6 +1601,15 @@ def _render_html(
   .pct-pill.bad {{ background: var(--color-bad-bg); padding: 3px 10px; border-radius: 99px; }}
 
   /* ── Playbook ── */
+  .playbook-mode-tabs {{ display: flex; gap: 4px; margin-bottom: 16px; border-bottom: 1px solid var(--color-border); }}
+  .playbook-tab {{
+    appearance: none; border: none; background: none; cursor: pointer;
+    font-family: inherit; font-size: 14px; font-weight: 600;
+    color: var(--color-text-secondary); padding: 8px 4px 10px; margin-right: 20px;
+    border-bottom: 2px solid transparent;
+  }}
+  .playbook-tab.active {{ color: var(--color-text); border-bottom-color: var(--color-text); }}
+  .playbook-overview-subtitle {{ font-size: 13px; color: var(--color-text-secondary); margin: -6px 0 14px; }}
   .playbook-header {{ display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }}
   .playbook-header-controls {{ display: flex; gap: 8px; }}
   .playbook-header h2 {{ font-size: 17px; font-weight: 600; text-transform: capitalize; color: var(--color-text); }}
@@ -1772,25 +1841,52 @@ def _render_html(
 
   <!-- Playbook -->
   <div id="view-playbook" class="view">
-    <div class="playbook-header">
-      <h2 id="playbook-title">{first_title} <span class="sample-count" id="playbook-count"></span></h2>
-      <div class="playbook-header-controls">
-        <select class="select-styled" id="persona-picker" onchange="selectPersona(this.value)">
-          <option value="all">All</option>
-          {persona_options_html}
-        </select>
-        <select class="select-styled" id="type-picker" onchange="selectType(this.value)">
-          <option value="">— select type —</option>
-        </select>
-      </div>
+    <div class="playbook-mode-tabs">
+      <button type="button" class="playbook-tab active" data-mode="content-type" onclick="selectPlaybookMode('content-type')">By content type</button>
+      <button type="button" class="playbook-tab" data-mode="persona" onclick="selectPlaybookMode('persona')">By persona</button>
     </div>
-    <div class="insufficient-note" id="persona-confidence-banner" style="display:none"></div>
-    <div class="playbook-card">
-      {playbook_panels}
-      <div id="panel-persona-empty" class="playbook-panel" style="display:none">
-        <p class="insufficient-note">⚠ No eligible emails for this content type and persona combination.</p>
+
+    <div id="playbook-mode-content-type">
+      <div class="playbook-header">
+        <h2 id="playbook-title">{first_title} <span class="sample-count" id="playbook-count"></span></h2>
+        <div class="playbook-header-controls">
+          <select class="select-styled" id="persona-picker" onchange="selectPersona(this.value)">
+            <option value="all">All</option>
+            {persona_options_html}
+          </select>
+          <select class="select-styled" id="type-picker" onchange="selectType(this.value)">
+            <option value="">— select type —</option>
+          </select>
+        </div>
       </div>
-    </div>
+      <div class="insufficient-note" id="persona-confidence-banner" style="display:none"></div>
+      <div class="playbook-card">
+        {playbook_panels}
+        <div id="panel-persona-empty" class="playbook-panel" style="display:none">
+          <p class="insufficient-note">⚠ No eligible emails for this content type and persona combination.</p>
+        </div>
+      </div>
+    </div><!-- /playbook-mode-content-type -->
+
+    <div id="playbook-mode-persona" style="display:none">
+      <div class="playbook-header">
+        <h2 id="playbook-overview-title">All Personas <span class="sample-count" id="playbook-overview-count"></span></h2>
+        <div class="playbook-header-controls">
+          <select class="select-styled" id="persona-overview-picker" onchange="selectOverviewPersona(this.value)">
+            <option value="all">All</option>
+            {persona_overview_picker_options}
+          </select>
+        </div>
+      </div>
+      <p class="playbook-overview-subtitle">Emails across all content types for the selected persona, analyzed together — surfaces patterns a single content type can't (e.g. a persona that engages consistently, or is cold, regardless of what's sent).</p>
+      <div class="insufficient-note" id="persona-overview-confidence-banner" style="display:none"></div>
+      <div class="playbook-card">
+        {persona_overview_panels}
+        <div id="panel-overview-empty" class="playbook-panel" style="display:none">
+          <p class="insufficient-note">⚠ No eligible emails for this persona.</p>
+        </div>
+      </div>
+    </div><!-- /playbook-mode-persona -->
   </div><!-- /playbook -->
 
   <!-- Pipeline -->
@@ -1895,6 +1991,7 @@ const PERSONA_PLAYBOOK_META = {persona_playbook_meta_json};
 const PERSONA_CONFIDENCE = {persona_confidence_json};
 const OVERALL_UNCLASSIFIED_PCT = {json.dumps(overall_unclassified_pct)};
 const PERSONA_DATA_ERROR = {json.dumps(persona_data_error)};
+const PERSONA_OVERVIEW_META = {persona_overview_meta_json};
 const AI_SUMMARIES = {json.dumps(ai_summaries)};
 const AI_QUARTERS = {json.dumps(QUARTER_DEFINITIONS)};
 const PIPELINE_DATA = {pipeline_data_json};
@@ -2332,38 +2429,76 @@ function updateAiSummary(typeFilter, campaignFilter, from, to) {{
 }}
 
 let currentPersona = 'all';
+let playbookMode = 'content-type';
+let currentOverviewPersona = 'all';
 
 function personaPanelId(anchor) {{
   return currentPersona === 'all' ? 'panel-' + anchor : 'panel-' + currentPersona + '-' + anchor;
 }}
 
-function renderPersonaBanner() {{
-  const banner = document.getElementById('persona-confidence-banner');
+// Shared by both the By-content-type persona banner and the By-persona
+// banner — same PERSONA_DATA_ERROR / OVERALL_UNCLASSIFIED_PCT / PERSONA_CONFIDENCE
+// inputs apply to a persona selection regardless of which view it's made in.
+function confidenceBannerText(personaKey) {{
   // A HubSpot API failure while building persona data (e.g. a missing
   // scope) looks identical to "no eligible emails" unless called out
   // explicitly — this takes priority over both the 'all' and per-persona
   // banners so it's never mistaken for a real data-quality signal.
-  if (PERSONA_DATA_ERROR && currentPersona !== 'all') {{
-    banner.style.display = '';
-    banner.textContent = `⚠ Persona data is unavailable right now (${{PERSONA_DATA_ERROR}}) — not that this segment has no eligible emails. Switch to "All" for the unsegmented view.`;
-    return;
+  if (PERSONA_DATA_ERROR && personaKey !== 'all') {{
+    return `⚠ Persona data is unavailable right now (${{PERSONA_DATA_ERROR}}) — not that this segment has no eligible emails. Switch to "All" for the unsegmented view.`;
   }}
-  if (currentPersona === 'all') {{
-    if (OVERALL_UNCLASSIFIED_PCT > 0) {{
-      banner.style.display = '';
-      banner.textContent = `⚠ ${{OVERALL_UNCLASSIFIED_PCT}}% of contacts across analyzed sends could not be classified into a persona (Job Function blank/other, no Job Title match).`;
-    }} else {{
-      banner.style.display = 'none';
-    }}
-    return;
+  if (personaKey === 'all') {{
+    return OVERALL_UNCLASSIFIED_PCT > 0
+      ? `⚠ ${{OVERALL_UNCLASSIFIED_PCT}}% of contacts across analyzed sends could not be classified into a persona (Job Function blank/other, no Job Title match).`
+      : '';
   }}
-  const c = PERSONA_CONFIDENCE[currentPersona];
+  const c = PERSONA_CONFIDENCE[personaKey];
   if (c && c.total_contacts > 0) {{
-    banner.style.display = '';
-    banner.textContent = `ℹ ${{c.clean_pct}}% of this segment's contacts came directly from Job Function; ${{c.fallback_pct}}% were reclassified from Job Title (fallback match).`;
-  }} else {{
-    banner.style.display = 'none';
+    return `ℹ ${{c.clean_pct}}% of this segment's contacts came directly from Job Function; ${{c.fallback_pct}}% were reclassified from Job Title (fallback match).`;
   }}
+  return '';
+}}
+
+function renderPersonaBanner() {{
+  const banner = document.getElementById('persona-confidence-banner');
+  const text = confidenceBannerText(currentPersona);
+  banner.style.display = text ? '' : 'none';
+  banner.textContent = text;
+}}
+
+function renderOverviewBanner() {{
+  const banner = document.getElementById('persona-overview-confidence-banner');
+  const text = confidenceBannerText(currentOverviewPersona);
+  banner.style.display = text ? '' : 'none';
+  banner.textContent = text;
+}}
+
+function renderOverviewPanel() {{
+  document.querySelectorAll('#playbook-mode-persona .playbook-panel').forEach(p => p.style.display = 'none');
+  let panel = document.getElementById('panel-overview-' + currentOverviewPersona);
+  if (!panel) panel = document.getElementById('panel-overview-empty');
+  if (panel) panel.style.display = '';
+  renderOverviewBanner();
+
+  const meta = PERSONA_OVERVIEW_META[currentOverviewPersona];
+  const title = meta ? meta.title : '';
+  const count = meta ? meta.count : '';
+  document.getElementById('playbook-overview-title').childNodes[0].textContent = title + ' ';
+  document.getElementById('playbook-overview-count').textContent = (count || count === 0) ? count + ' emails' : '';
+}}
+
+function selectOverviewPersona(persona) {{
+  currentOverviewPersona = persona;
+  document.getElementById('persona-overview-picker').value = persona;
+  renderOverviewPanel();
+}}
+
+function selectPlaybookMode(mode) {{
+  playbookMode = mode;
+  document.querySelectorAll('.playbook-tab').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+  document.getElementById('playbook-mode-content-type').style.display = mode === 'content-type' ? '' : 'none';
+  document.getElementById('playbook-mode-persona').style.display = mode === 'persona' ? '' : 'none';
+  if (mode === 'persona') renderOverviewPanel();
 }}
 
 function renderPlaybookPanel(anchor) {{
@@ -2409,6 +2544,8 @@ selectType('{first_anchor}');
 document.getElementById('type-picker').value = '{first_anchor}';
 document.getElementById('persona-picker').value = 'all';
 renderPersonaBanner();
+document.getElementById('persona-overview-picker').value = 'all';
+renderOverviewPanel();
 
 {cowrite_js}
 </script>
@@ -2448,11 +2585,19 @@ def generate_report(
         }
         print("\nRunning per-persona analyzer…")
         persona_playbooks = build_persona_playbooks(persona_email_groups, token=token)
+
+        print("\nRunning per-persona analyzer (By persona view — across all content types)…")
+        persona_overview_playbooks = build_persona_overview_playbooks(persona_email_groups, token=token)
+        all_personas_overview_playbook = build_all_personas_overview_playbook(
+            [e for e in current if e.content_type], token=token
+        )
     except Exception as e:
         print(f"  ✗ Persona segmentation failed: {e}")
         persona_data_result = None
         persona_email_groups = {}
         persona_playbooks = {}
+        persona_overview_playbooks = {}
+        all_personas_overview_playbook = {"status": "error", "error": str(e)}
         # Surfaced verbatim by renderPersonaBanner() (PERSONA_DATA_ERROR) so
         # a HubSpot scope/permission failure reads as "data unavailable",
         # not "no eligible emails".
@@ -2617,6 +2762,8 @@ def generate_report(
         persona_confidence=(persona_data_result.persona_confidence if persona_data_result else {}),
         overall_unclassified_pct=(persona_data_result.overall_unclassified_pct if persona_data_result else 0.0),
         persona_data_error=persona_data_error,
+        persona_overview_playbooks=persona_overview_playbooks,
+        all_personas_overview_playbook=all_personas_overview_playbook,
         nurture_segments=nurture_segments,
     )
 

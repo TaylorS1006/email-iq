@@ -125,6 +125,165 @@ def _analyze_content_type(
     return json.loads(text)
 
 
+def _build_cross_type_prompt(segment_label: str, emails: list[EmailRecord]) -> str:
+    """
+    Like _build_prompt, but for a segment (persona, or "All personas") whose
+    emails span multiple content types mixed together. Each data row carries
+    its content_type so Claude can compare across types — _build_prompt's
+    rows never expose content_type since every call there is already scoped
+    to one type.
+    """
+    sorted_emails = sorted(emails, key=lambda e: e.open_rate, reverse=True)
+
+    lines = [
+        f"You are analyzing {len(emails)} marketing emails sent by a B2B SaaS company to the "
+        f"'{segment_label}' audience segment, spanning ALL content types mixed together "
+        "(announcements, webinars, newsletters, etc.) — not filtered to one type.",
+        "",
+        "Here is the email data (sorted by open rate, highest first):",
+        "",
+    ]
+
+    for e in sorted_emails:
+        send_date = e.send_date.strftime("%Y-%m-%d") if e.send_date else "unknown"
+        lines.append(
+            f"- Content type: {e.content_type or 'unknown'} | Subject: {e.subject!r} | "
+            f"Sent: {e.sent:,} | Open rate: {e.open_rate:.1%} | Click rate: {e.click_rate:.1%} "
+            f"| Date: {send_date}"
+        )
+
+    lines += [
+        "",
+        "Based ONLY on the patterns visible in this data, produce a playbook with these fields:",
+        "  executive_summary: 2-4 sentences synthesizing how this segment engages across content "
+        "types and what to do differently next time. This is a takeaway, not a restatement of "
+        "the raw numbers — someone who already saw the table should learn something from this.",
+        "  insights: A list of individual findings, each covering ONE specific pattern. Because "
+        "this data spans multiple content types, you MUST include at least one insight that "
+        "directly compares this segment's performance ACROSS content types — e.g. whether "
+        "engagement is consistently strong/weak regardless of type, or concentrated in/absent "
+        "from specific types. Use 'none' confidence if the data doesn't support a clear "
+        "cross-type pattern. You MUST also include at least one insight for subject line "
+        "wording, one for subject length, and one for send timing — use 'none' confidence for "
+        "any of these where the data doesn't support a conclusion, rather than skipping it. Add "
+        "further insights for CTA/content themes or any other pattern you find. For each "
+        "insight, set:",
+        "    - headline: one short, specific sentence stating the finding.",
+        "    - confidence: 'strong' if the pattern is clear and consistent across multiple emails, "
+        "'moderate' if directional but caveated (small sample, one outlier, conflicting signal), "
+        "or 'none' if you checked for a pattern along this dimension and the data does NOT "
+        "support one — say so explicitly rather than omitting the insight.",
+        "    - key_stat: the single most relevant number backing this insight (a rate, a count, "
+        "or a percentage-point gap).",
+        "    - reasoning: 1-3 sentences of supporting detail and caveats.",
+        "    - action: for 'strong' insights, one concrete 'try this next' recommendation. For "
+        "'moderate' or 'none' insights, use an empty string.",
+        "  top_performing_examples: List 2-3 actual subject lines from the top-performing emails.",
+        "  data_quality_note: One consolidated note covering sample size, how the sends are "
+        "distributed across content types (a pattern seen in only one type is weaker evidence "
+        "than one seen across several), audience-size skew, and any subject lines repeated "
+        "across multiple sends/segments — whatever caveats apply here.",
+        "",
+        "IMPORTANT: Only report patterns actually supported by this data. Do not add generic "
+        "email best-practices that are not evidenced here.",
+        "",
+        "Return ONLY valid JSON matching the schema — no markdown fences, no extra keys.",
+    ]
+
+    return "\n".join(lines)
+
+
+def _analyze_segment(
+    client: anthropic.Anthropic,
+    segment_label: str,
+    emails: list[EmailRecord],
+) -> dict:
+    prompt = _build_cross_type_prompt(segment_label, emails)
+
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=4096,
+        output_config={"format": {"type": "json_schema", "schema": _PLAYBOOK_SCHEMA}},
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    text = next(b.text for b in response.content if b.type == "text")
+    return json.loads(text)
+
+
+def _build_segment_playbook(
+    client: anthropic.Anthropic,
+    segment_label: str,
+    emails: list[EmailRecord],
+    *,
+    prefix: str = "",
+) -> dict:
+    """
+    Single-group counterpart to _build_playbook_from_groups — the segment's
+    emails are already flattened across content types by the caller, so
+    there's exactly one Claude call (or 'insufficient_data' skip) here
+    rather than one per content type.
+    """
+    if len(emails) < MIN_SAMPLE_SIZE:
+        print(f"{prefix}[{segment_label}] Insufficient data ({len(emails)} emails, need {MIN_SAMPLE_SIZE}+)")
+        return {
+            "status": "insufficient_data",
+            "sample_count": len(emails),
+            "minimum_required": MIN_SAMPLE_SIZE,
+        }
+
+    print(f"{prefix}[{segment_label}] Analyzing {len(emails)} emails across content types…")
+    try:
+        result = _analyze_segment(client, segment_label, emails)
+        result["sample_count"] = len(emails)
+        print("  ✓ Done")
+        return result
+    except Exception as exc:
+        print(f"  ✗ Error: {exc}")
+        return {"status": "error", "error": str(exc)}
+
+
+def build_persona_overview_playbooks(
+    persona_email_groups: dict[str, dict[str, list[EmailRecord]]],
+    *,
+    token: Optional[str] = None,
+) -> dict[str, dict]:
+    """
+    One playbook per persona, aggregating that persona's emails across ALL
+    content types — the "By persona" Playbook view. Distinct from
+    build_persona_playbooks, which cross-tabs (persona, content_type) cells
+    and never lets Claude see a persona's data across types at once.
+
+    Returns {persona: playbook_or_status}, one level deep (not nested by
+    content_type), so it drops directly into _render_playbook_panel like
+    build_playbook's per-content-type results do.
+    """
+    client = anthropic.Anthropic(api_key=token or os.environ["ANTHROPIC_API_KEY"])
+
+    playbooks: dict[str, dict] = {}
+    for persona, groups in persona_email_groups.items():
+        flattened = [e for group in groups.values() for e in group]
+        playbooks[persona] = _build_segment_playbook(
+            client, persona, flattened, prefix="[persona-overview] "
+        )
+    return playbooks
+
+
+def build_all_personas_overview_playbook(
+    emails: list[EmailRecord],
+    *,
+    token: Optional[str] = None,
+) -> dict:
+    """
+    The "All" option in the By-persona view — every email in the analyzed
+    window, across every persona and content type, as one segment. Shares
+    the same cross-content-type prompt/gating as build_persona_overview_playbooks
+    so "All" behaves consistently with the per-persona entries next to it.
+    """
+    client = anthropic.Anthropic(api_key=token or os.environ["ANTHROPIC_API_KEY"])
+    return _build_segment_playbook(client, "All personas", emails, prefix="[persona-overview] ")
+
+
 def _build_playbook_from_groups(
     client: anthropic.Anthropic,
     groups: dict[str, list["EmailRecord"]],
